@@ -1,0 +1,2083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0F172A" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="FX Journal" />
+<meta name="description" content="Mobile-first forex trading journal. 100% offline, no external dependencies. Your data stays on this device." />
+<title>FX Discipline — Trading Journal</title>
+
+<style>
+  html, body { margin: 0; padding: 0; background: #0F172A; overscroll-behavior-y: none; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #root { min-height: 100vh; }
+  * { box-sizing: border-box; }
+  ::-webkit-scrollbar { display: none; }
+  input::placeholder, textarea::placeholder { color: #94A3B8; opacity: 0.7; }
+  select { appearance: none; -webkit-appearance: none; }
+  input[type="range"] { accent-color: #38BDF8; width: 100%; }
+  input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); }
+  button { font-family: inherit; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #boot-error {
+    display: none; max-width: 420px; background: #1E293B; border: 1px solid #EF4444;
+    border-radius: 12px; padding: 16px; color: #E5E7EB; font-size: 13px; line-height: 1.6;
+    text-align: left; white-space: pre-wrap; word-break: break-word; margin-top: 14px;
+  }
+  #boot-error.show { display: block; }
+  #boot-error b { color: #EF4444; }
+</style>
+
+<script>
+  /* Boot diagnostics: if a script error happens before the app mounts, show it instead of a blank screen. */
+  window.__bootOk = false;
+  window.addEventListener("error", function (e) {
+    showBootError("Script error: " + (e.message || "unknown error") + (e.lineno ? " (line " + e.lineno + ")" : ""));
+  });
+  function showBootError(msg) {
+    if (window.__bootOk) return;
+    var el2 = document.getElementById("boot-error");
+    if (el2) { el2.classList.add("show"); el2.innerHTML = "<b>Details:</b>\n" + msg; }
+  }
+</script>
+</head>
+<body>
+<div id="root">
+  <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;color:#94A3B8;font-family:-apple-system,sans-serif;font-size:14px;padding:24px;text-align:center;">
+    <div style="width:32px;height:32px;border-radius:50%;border:3px solid #2C3E59;border-top-color:#38BDF8;animation:spin 0.8s linear infinite;margin-bottom:14px;"></div>
+    Starting FX Discipline…
+    <div id="boot-error"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   DESIGN TOKENS
+   ============================================================ */
+const C = {
+  bg: "#0F172A", card: "#1E293B", cardAlt: "#243349", border: "#2C3E59",
+  accent: "#38BDF8", profit: "#22C55E", loss: "#EF4444",
+  text: "#E5E7EB", subtext: "#94A3B8", warn: "#F59E0B",
+};
+
+/* ============================================================
+   PERSISTENT STORAGE (IndexedDB) — fully offline, no network.
+   ============================================================ */
+const DB_NAME = "fx_discipline_db";
+const DB_VERSION = 1;
+const STORE_NAME = "appState";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function dbGet(key) {
+  try {
+    const db = await openDB();
+    return await new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const r = tx.objectStore(STORE_NAME).get(key);
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  } catch (e) { console.error("dbGet failed", e); return undefined; }
+}
+async function dbSet(key, value) {
+  try {
+    const db = await openDB();
+    return await new Promise((res, rej) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const r = tx.objectStore(STORE_NAME).put(value, key);
+      r.onsuccess = () => res(true);
+      r.onerror = () => rej(r.error);
+    });
+  } catch (e) { console.error("dbSet failed", e); return false; }
+}
+
+const KEYS = { trades: "trades", strategies: "strategies", symbols: "symbols", eduNotes: "eduNotes", eduFiles: "eduFiles", newsEvents: "newsEvents", settings: "settings", accounts: "accounts", initialized: "initialized" };
+
+async function loadAppState() {
+  const initialized = await dbGet(KEYS.initialized);
+  if (!initialized) return null;
+  const [trades, strategies, symbols, eduNotes, eduFiles, newsEvents, settings, accounts] = await Promise.all(
+    [KEYS.trades, KEYS.strategies, KEYS.symbols, KEYS.eduNotes, KEYS.eduFiles, KEYS.newsEvents, KEYS.settings, KEYS.accounts].map(dbGet)
+  );
+  return { trades, strategies, symbols, eduNotes, eduFiles, newsEvents, settings, accounts };
+}
+async function saveAppState(state) {
+  await Promise.all([
+    dbSet(KEYS.trades, state.trades), dbSet(KEYS.strategies, state.strategies),
+    dbSet(KEYS.symbols, state.symbols), dbSet(KEYS.eduNotes, state.eduNotes),
+    dbSet(KEYS.eduFiles, state.eduFiles), dbSet(KEYS.newsEvents, state.newsEvents),
+    dbSet(KEYS.settings, state.settings), dbSet(KEYS.accounts, state.accounts), dbSet(KEYS.initialized, true),
+  ]);
+}
+function exportToFile(state) {
+  const payload = { appName: "FX Discipline", exportedAt: new Date().toISOString(), version: 1, data: state };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `fx-discipline-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function importFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (!parsed.data) throw new Error("Invalid backup file format");
+        resolve(parsed.data);
+      } catch (e) { reject(e); }
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsText(file);
+  });
+}
+
+/* ============================================================
+   TINY DOM HELPERS (no framework)
+   ============================================================ */
+function el(tag, attrs, children) {
+  const node = document.createElement(tag);
+  attrs = attrs || {};
+  for (const k in attrs) {
+    if (k === "style" && typeof attrs[k] === "object") {
+      Object.assign(node.style, attrs[k]);
+    } else if (k.startsWith("on") && typeof attrs[k] === "function") {
+      node.addEventListener(k.slice(2).toLowerCase(), attrs[k]);
+    } else if (k === "html") {
+      node.innerHTML = attrs[k];
+    } else if (k === "className") {
+      node.className = attrs[k];
+    } else if (attrs[k] !== undefined && attrs[k] !== null && attrs[k] !== false) {
+      node.setAttribute(k, attrs[k] === true ? "" : attrs[k]);
+    }
+  }
+  children = children || [];
+  if (!Array.isArray(children)) children = [children];
+  children.forEach((c) => {
+    if (c === null || c === undefined || c === false) return;
+    node.appendChild(typeof c === "string" || typeof c === "number" ? document.createTextNode(c) : c);
+  });
+  return node;
+}
+function svgEl(tag, attrs, children) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  attrs = attrs || {};
+  for (const k in attrs) {
+    if (attrs[k] !== undefined && attrs[k] !== null) node.setAttribute(k, attrs[k]);
+  }
+  (children || []).forEach((c) => node.appendChild(c));
+  return node;
+}
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+const fmtMoney = (n) => `${n < 0 ? "\u2212" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const fmtPct = (n) => `${n.toFixed(1)}%`;
+const pnlColor = (n) => (n > 0 ? C.profit : n < 0 ? C.loss : C.subtext);
+const uid = (p) => `${p || "id"}_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+const SESSION_OPTIONS = ["Asia", "London", "New York", "London/New York Overlap"];
+
+/* Suggests a trading session from a 24h local time string "HH:MM" or "HH:MM:SS".
+   Uses commonly-referenced approximate session windows (local browser time):
+   Asia 00:00-08:00, London 08:00-13:00, Overlap 13:00-16:00, New York 16:00-21:00.
+   This is a starting suggestion only — always editable by the user since real
+   session boundaries depend on the user's timezone and DST. */
+function suggestSession(timeStr) {
+  if (!timeStr) return SESSION_OPTIONS[0];
+  const hour = Number(timeStr.split(":")[0]);
+  if (isNaN(hour)) return SESSION_OPTIONS[0];
+  if (hour >= 0 && hour < 8) return "Asia";
+  if (hour >= 8 && hour < 13) return "London";
+  if (hour >= 13 && hour < 16) return "London/New York Overlap";
+  if (hour >= 16 && hour < 21) return "New York";
+  return "Asia";
+}
+
+function computeStats(trades) {
+  const wins = trades.filter((t) => t.result === "Win");
+  const losses = trades.filter((t) => t.result === "Loss");
+  const net = trades.reduce((s, t) => s + t.pnl, 0);
+  const grossWin = wins.reduce((s, t) => s + t.pnl, 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
+  const winRate = trades.length ? (wins.length / trades.length) * 100 : 0;
+  const profitFactor = grossLoss ? grossWin / grossLoss : grossWin > 0 ? Infinity : 0;
+  let peak = -Infinity, maxDD = 0, running = 10000;
+  trades.forEach((t) => {
+    running += t.pnl;
+    if (running > peak) peak = running;
+    const dd = peak - running;
+    if (dd > maxDD) maxDD = dd;
+  });
+  return {
+    net, winRate, profitFactor, maxDD, total: trades.length, wins: wins.length, losses: losses.length,
+    winLossRatio: losses.length ? wins.length / losses.length : wins.length,
+    recoveryFactor: maxDD ? net / maxDD : 0,
+  };
+}
+"use strict";
+
+/* ============================================================
+   SEED / MOCK DATA
+   ============================================================ */
+const PAIRS = ["XAUUSD", "EURUSD", "GBPUSD", "BTCUSD", "USDJPY"];
+const MISTAKES = ["Early Entry", "No Confirmation", "Overtrading", "Poor Risk Management", "Ignored Strategy"];
+const EMOTIONS = ["Calm", "Confident", "Anxious", "FOMO", "Frustrated", "Neutral"];
+
+function genTrades() {
+  const trades = [];
+  let equity = 10000;
+  const startDate = new Date(2026, 3, 1);
+  for (let i = 0; i < 42; i++) {
+    const date = new Date(startDate);
+    date.setDate(date.getDate() + Math.floor(i * 1.6));
+    const pair = PAIRS[Math.floor(Math.random() * PAIRS.length)];
+    const isWin = Math.random() > 0.42;
+    const isBE = !isWin && Math.random() > 0.85;
+    const result = isBE ? "Breakeven" : isWin ? "Win" : "Loss";
+    const pnl = result === "Breakeven" ? 0 : result === "Win"
+      ? +(Math.random() * 380 + 40).toFixed(2)
+      : -(Math.random() * 260 + 30).toFixed(2);
+    equity += Number(pnl);
+    const hour = Math.floor(Math.random() * 24);
+    const minute = Math.floor(Math.random() * 60);
+    const second = Math.floor(Math.random() * 60);
+    const timeStr = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+    trades.push({
+      id: uid("T"), date: date.toISOString().slice(0, 10), time: timeStr, pair,
+      type: Math.random() > 0.5 ? "Buy" : "Sell",
+      entry: (1.05 + Math.random() * 0.5).toFixed(4),
+      sl: (1.0 + Math.random() * 0.3).toFixed(4),
+      tp: (1.1 + Math.random() * 0.6).toFixed(4),
+      lot: (Math.random() * 2 + 0.1).toFixed(2),
+      risk: (Math.random() * 2 + 0.5).toFixed(1),
+      result, pnl: Number(pnl), equity: Math.round(equity),
+      strategy: Math.random() > 0.5 ? "Breakout Momentum" : "Liquidity Sweep",
+      session: suggestSession(timeStr),
+      hour,
+      day: date.toLocaleDateString("en-US", { weekday: "short" }),
+      emotion: EMOTIONS[Math.floor(Math.random() * EMOTIONS.length)],
+      confidence: Math.floor(Math.random() * 5) + 1,
+      mistakes: result === "Loss" && Math.random() > 0.4 ? [MISTAKES[Math.floor(Math.random() * MISTAKES.length)]] : [],
+      notes: "", specialNotes: "",
+      account: "Main Account",
+      commission: -(Math.random() * 4 + 0.5).toFixed(2),
+      media: [],
+    });
+  }
+  return trades;
+}
+
+const DEFAULT_STRATEGIES = [
+  {
+    id: "s1", name: "Breakout Momentum",
+    stages: [
+      { id: "st1", name: "Start of Trading Day", tasks: [
+        { id: "t1", label: "Reviewed economic calendar", done: false },
+        { id: "t2", label: "Checked overnight news", done: false },
+        { id: "t3", label: "Set daily loss limit", done: false },
+      ]},
+      { id: "st2", name: "Market Analysis", tasks: [
+        { id: "t4", label: "Identified higher timeframe trend", done: false },
+        { id: "t5", label: "Marked key support/resistance", done: false },
+        { id: "t6", label: "Checked correlated pairs", done: false },
+      ]},
+      { id: "st3", name: "Before Trade", subsections: [
+        { id: "sub1", name: "Pre Trade", tasks: [
+          { id: "t7", label: "Confirmed setup matches strategy rules", done: false },
+          { id: "t8", label: "Calculated position size", done: false },
+        ]},
+        { id: "sub2", name: "Entry Execution", tasks: [
+          { id: "t9", label: "Set stop loss before entry", done: false },
+          { id: "t10", label: "Set take profit target", done: false },
+        ]},
+      ]},
+      { id: "st4", name: "During Trade", tasks: [
+        { id: "t11", label: "No mid-trade rule changes", done: false },
+        { id: "t12", label: "Monitored without emotional interference", done: false },
+      ]},
+      { id: "st5", name: "After Trade", tasks: [
+        { id: "t13", label: "Logged trade in journal", done: false },
+        { id: "t14", label: "Reviewed execution quality", done: false },
+      ]},
+    ],
+  },
+];
+
+const NEWS_EVENTS = [
+  { id: "n1", date: "2026-07-01", currency: "USD", event: "Non-Farm Payrolls", impact: "High", forecast: "180K", previous: "165K", actual: "\u2014" },
+  { id: "n2", date: "2026-07-01", currency: "EUR", event: "ECB Rate Decision", impact: "High", forecast: "3.75%", previous: "3.75%", actual: "3.75%" },
+  { id: "n3", date: "2026-07-02", currency: "GBP", event: "GDP m/m", impact: "Medium", forecast: "0.2%", previous: "0.1%", actual: "\u2014" },
+  { id: "n4", date: "2026-07-02", currency: "USD", event: "ISM Manufacturing PMI", impact: "Medium", forecast: "49.5", previous: "48.7", actual: "\u2014" },
+  { id: "n5", date: "2026-07-03", currency: "JPY", event: "BoJ Policy Statement", impact: "High", forecast: "\u2014", previous: "\u2014", actual: "\u2014" },
+];
+
+const EDU_NOTES = [
+  { id: "e1", category: "Golden Rules", title: "Never risk more than 2% per trade", body: "Position size is calculated before entry, not adjusted after." },
+  { id: "e2", category: "Trading Psychology", title: "FOMO checklist", body: "If I feel rushed to enter, that is the signal to wait for the next setup." },
+  { id: "e3", category: "Common Mistakes", title: "Moving stop loss", body: "Widening a stop loss after entry is a rule violation, not a strategy adjustment." },
+];
+
+const EDU_FILES = [
+  { id: "f1", name: "Liquidity Sweep Strategy.pdf", type: "pdf", size: "2.4 MB" },
+  { id: "f2", name: "Session Volatility Chart.png", type: "image", size: "850 KB" },
+  { id: "f3", name: "Risk Management Walkthrough.mp4", type: "video", size: "44 MB" },
+];
+
+const EDU_CATEGORIES = ["Golden Rules", "Strategy Notes", "Trading Psychology", "Common Mistakes", "Market Insights"];
+
+const DEFAULT_ACCOUNTS = [
+  { id: "acc1", name: "Main Account", number: "1024578", broker: "" },
+];
+"use strict";
+
+/* ============================================================
+   ICONS — returns raw SVG DOM nodes (lucide-style paths)
+   ============================================================ */
+function Icon(paths, size, color) {
+  size = size || 18;
+  const svg = svgEl("svg", {
+    width: size, height: size, viewBox: "0 0 24 24", fill: "none",
+    stroke: color || "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round",
+  }, paths);
+  svg.style.flexShrink = "0";
+  return svg;
+}
+function P(d) { return svgEl("path", { d }); }
+function Poly(points) { return svgEl("polyline", { points }); }
+function Rect(x, y, w, h, rx) { return svgEl("rect", { x, y, width: w, height: h, rx: rx || 0 }); }
+function Circ(cx, cy, r) { return svgEl("circle", { cx, cy, r }); }
+function Ln(x1, y1, x2, y2) { return svgEl("line", { x1, y1, x2, y2 }); }
+
+const Icons = {
+  dashboard: (s, c) => Icon([Rect(3,3,7,9,1), Rect(14,3,7,5,1), Rect(14,12,7,9,1), Rect(3,16,7,5,1)], s, c),
+  checklist: (s, c) => Icon([Poly("9 11 12 14 22 4"), P("M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")], s, c),
+  journal: (s, c) => Icon([P("M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"), P("M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z")], s, c),
+  upload: (s, c) => Icon([P("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), Poly("17 8 12 3 7 8"), Ln(12,3,12,15)], s, c),
+  analytics: (s, c) => Icon([P("M3 3v18h18"), P("M18 17V9"), P("M13 17V5"), P("M8 17v-3")], s, c),
+  news: (s, c) => Icon([P("M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"), P("M18 14h-8"), P("M15 18h-5"), P("M10 6h8v4h-8V6Z")], s, c),
+  education: (s, c) => Icon([P("M22 10v6M2 10l10-5 10 5-10 5z"), P("M6 12v5c0 2 4 3 6 3s6-1 6-3v-5")], s, c),
+  settings: (s, c) => Icon([Circ(12,12,3), P("M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z")], s, c),
+  chevronDown: (s, c) => Icon([Poly("6 9 12 15 18 9")], s, c),
+  chevronRight: (s, c) => Icon([Poly("9 18 15 12 9 6")], s, c),
+  chevronLeft: (s, c) => Icon([Poly("15 18 9 12 15 6")], s, c),
+  plus: (s, c) => Icon([Ln(12,5,12,19), Ln(5,12,19,12)], s, c),
+  trash: (s, c) => Icon([Poly("3 6 5 6 21 6"), P("M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"), Ln(10,11,10,17), Ln(14,11,14,17)], s, c),
+  x: (s, c) => Icon([Ln(18,6,6,18), Ln(6,6,18,18)], s, c),
+  trendUp: (s, c) => Icon([Poly("23 6 13.5 15.5 8.5 10.5 1 18"), Poly("17 6 23 6 23 12")], s, c),
+  trendDown: (s, c) => Icon([Poly("23 18 13.5 8.5 8.5 13.5 1 6"), Poly("17 18 23 18 23 12")], s, c),
+  target: (s, c) => Icon([Circ(12,12,10), Circ(12,12,6), Circ(12,12,2)], s, c),
+  activity: (s, c) => Icon([Poly("22 12 18 12 15 21 9 3 6 12 2 12")], s, c),
+  image: (s, c) => Icon([Rect(3,3,18,18,2), Circ(8.5,8.5,1.5), Poly("21 15 16 10 5 21")], s, c),
+  file: (s, c) => Icon([P("M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2Z"), Poly("14 2 14 8 20 8"), Ln(16,13,8,13), Ln(16,17,8,17)], s, c),
+  video: (s, c) => Icon([svgEl("polygon", { points: "23 7 16 12 23 17 23 7" }), Rect(1,5,15,14,2)], s, c),
+  search: (s, c) => Icon([Circ(11,11,8), Ln(21,21,16.65,16.65)], s, c),
+  lock: (s, c) => Icon([Rect(3,11,18,11,2), P("M7 11V7a5 5 0 0 1 10 0v4")], s, c),
+  globe: (s, c) => Icon([Circ(12,12,10), Ln(2,12,22,12), P("M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z")], s, c),
+  moon: (s, c) => Icon([P("M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z")], s, c),
+  sun: (s, c) => Icon([Circ(12,12,5), Ln(12,1,12,3), Ln(12,21,12,23), Ln(4.22,4.22,5.64,5.64), Ln(18.36,18.36,19.78,19.78), Ln(1,12,3,12), Ln(21,12,23,12), Ln(4.22,19.78,5.64,18.36), Ln(18.36,5.64,19.78,4.22)], s, c),
+  download: (s, c) => Icon([P("M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"), Poly("7 10 12 15 17 10"), Ln(12,15,12,3)], s, c),
+  refresh: (s, c) => Icon([Poly("23 4 23 10 17 10"), Poly("1 20 1 14 7 14"), P("M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15")], s, c),
+  calendar: (s, c) => Icon([Rect(3,4,18,18,2), Ln(16,2,16,6), Ln(8,2,8,6), Ln(3,10,21,10)], s, c),
+  alert: (s, c) => Icon([P("m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"), Ln(12,9,12,13), Ln(12,17,12.01,17)], s, c),
+  check: (s, c) => Icon([Poly("20 6 9 17 4 12")], s, c),
+};
+"use strict";
+
+/* ============================================================
+   MINI CHART LIBRARY — plain SVG, no external chart library.
+   All functions return a DOM node ready to insert.
+   ============================================================ */
+
+function wrapChart(svg, height) {
+  const wrap = el("div", { style: { width: "100%", height: height + "px" } }, [svg]);
+  return wrap;
+}
+
+/* Area/line chart (equity curve) */
+function areaChart(values, opts) {
+  opts = opts || {};
+  const w = 320, h = opts.height || 160, pad = 6;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = (max - min) || 1;
+  const stepX = (w - pad * 2) / (values.length - 1 || 1);
+  const points = values.map((v, i) => {
+    const x = pad + i * stepX;
+    const y = pad + (1 - (v - min) / range) * (h - pad * 2);
+    return [x, y];
+  });
+  const linePath = points.map((p, i) => (i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`)).join(" ");
+  const areaPath = `${linePath} L${points[points.length - 1][0]},${h - pad} L${points[0][0]},${h - pad} Z`;
+
+  const gradId = "grad" + Math.floor(Math.random() * 1e6);
+  const defs = svgEl("defs", {}, [
+    svgEl("linearGradient", { id: gradId, x1: "0", y1: "0", x2: "0", y2: "1" }, [
+      svgEl("stop", { offset: "0%", "stop-color": C.accent, "stop-opacity": "0.35" }),
+      svgEl("stop", { offset: "100%", "stop-color": C.accent, "stop-opacity": "0" }),
+    ]),
+  ]);
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: h, preserveAspectRatio: "none" }, [
+    defs,
+    svgEl("path", { d: areaPath, fill: `url(#${gradId})`, stroke: "none" }),
+    svgEl("path", { d: linePath, fill: "none", stroke: C.accent, "stroke-width": "2", "stroke-linejoin": "round" }),
+  ]);
+
+  // Hover/touch tooltip
+  const tooltip = el("div", {
+    style: { position: "absolute", display: "none", background: C.cardAlt, border: `1px solid ${C.border}`, borderRadius: "8px", padding: "6px 10px", fontSize: "12px", color: C.text, pointerEvents: "none", whiteSpace: "nowrap", zIndex: "10" },
+  });
+  const container = el("div", { style: { position: "relative", width: "100%" } }, [svg, tooltip]);
+
+  function handleMove(clientX) {
+    const rect = svg.getBoundingClientRect();
+    const relX = ((clientX - rect.left) / rect.width) * w;
+    let idx = Math.round((relX - pad) / stepX);
+    idx = Math.max(0, Math.min(values.length - 1, idx));
+    const p = points[idx];
+    tooltip.textContent = (opts.money ? fmtMoney(values[idx]) : values[idx]);
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(Math.max((p[0] / w) * rect.width - 30, 0), rect.width - 60) + "px";
+    tooltip.style.top = Math.max((p[1] / h) * rect.height - 34, 0) + "px";
+  }
+  svg.addEventListener("mousemove", (e) => handleMove(e.clientX));
+  svg.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
+  svg.addEventListener("touchstart", (e) => handleMove(e.touches[0].clientX), { passive: true });
+  svg.addEventListener("touchmove", (e) => handleMove(e.touches[0].clientX), { passive: true });
+  svg.addEventListener("touchend", () => { tooltip.style.display = "none"; });
+
+  return container;
+}
+
+/* Vertical bar chart. data: [{label, value, color?}] */
+function barChart(data, opts) {
+  opts = opts || {};
+  const w = 320, h = opts.height || 150, pad = 8, gap = 6;
+  const values = data.map((d) => d.value);
+  const max = Math.max(...values, 0);
+  const min = Math.min(...values, 0);
+  const range = (max - min) || 1;
+  const zeroY = pad + (1 - (0 - min) / range) * (h - pad * 2 - 18);
+  const barW = (w - pad * 2 - gap * (data.length - 1)) / data.length;
+
+  const bars = data.map((d, i) => {
+    const x = pad + i * (barW + gap);
+    const valY = pad + (1 - (d.value - min) / range) * (h - pad * 2 - 18);
+    const barY = Math.min(valY, zeroY);
+    const barH = Math.max(Math.abs(valY - zeroY), 1);
+    const color = d.color || pnlColor(d.value);
+    return svgEl("rect", { x, y: barY, width: barW, height: barH, rx: 3, fill: color });
+  });
+
+  const labels = data.map((d, i) => {
+    const x = pad + i * (barW + gap) + barW / 2;
+    return svgEl("text", { x, y: h - 4, "text-anchor": "middle", "font-size": "9", fill: C.subtext, "font-family": "inherit" }, []).also((t) => (t.textContent = d.label));
+  });
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: h, preserveAspectRatio: "none" }, [...bars, ...(opts.showLabels === false ? [] : labels)]);
+  return svg;
+}
+
+/* Horizontal bar chart. data: [{label, value, color?}] */
+function hBarChart(data, opts) {
+  opts = opts || {};
+  const w = 320, rowH = opts.rowHeight || 26, h = data.length * rowH + 8;
+  const values = data.map((d) => d.value);
+  const maxAbs = Math.max(...values.map(Math.abs), 1);
+  const labelW = opts.labelWidth || 66;
+  const chartW = w - labelW - 12;
+
+  const rows = [];
+  data.forEach((d, i) => {
+    const y = i * rowH + 4;
+    const barW = (Math.abs(d.value) / maxAbs) * (chartW / 2);
+    const isPos = d.value >= 0;
+    const midX = labelW + chartW / 2;
+    const x = isPos ? midX : midX - barW;
+    const color = d.color || pnlColor(d.value);
+    rows.push(svgEl("text", { x: labelW - 8, y: y + rowH / 2 - 8, "text-anchor": "end", "font-size": "10.5", fill: C.subtext }).also((t) => (t.textContent = d.label)));
+    rows.push(svgEl("rect", { x, y: y, width: Math.max(barW, 1), height: rowH - 10, rx: 3, fill: color }));
+  });
+
+  return svgEl("svg", { viewBox: `0 0 ${w} ${h}`, width: "100%", height: h, preserveAspectRatio: "none" }, rows);
+}
+
+/* Donut/pie chart. data: [{label, value, color}] */
+function donutChart(data, opts) {
+  opts = opts || {};
+  const size = opts.size || 130, cx = size / 2, cy = size / 2, rOuter = size / 2 - 4, rInner = rOuter * 0.6;
+  const total = data.reduce((s, d) => s + d.value, 0) || 1;
+  let angleStart = -Math.PI / 2;
+  const paths = [];
+  data.forEach((d) => {
+    const frac = d.value / total;
+    const angleEnd = angleStart + frac * Math.PI * 2;
+    if (d.value > 0) {
+      const x1o = cx + rOuter * Math.cos(angleStart), y1o = cy + rOuter * Math.sin(angleStart);
+      const x2o = cx + rOuter * Math.cos(angleEnd), y2o = cy + rOuter * Math.sin(angleEnd);
+      const x1i = cx + rInner * Math.cos(angleEnd), y1i = cy + rInner * Math.sin(angleEnd);
+      const x2i = cx + rInner * Math.cos(angleStart), y2i = cy + rInner * Math.sin(angleStart);
+      const largeArc = frac > 0.5 ? 1 : 0;
+      const d_attr = `M${x1o},${y1o} A${rOuter},${rOuter} 0 ${largeArc} 1 ${x2o},${y2o} L${x1i},${y1i} A${rInner},${rInner} 0 ${largeArc} 0 ${x2i},${y2i} Z`;
+      paths.push(svgEl("path", { d: d_attr, fill: d.color }));
+    }
+    angleStart = angleEnd;
+  });
+  return svgEl("svg", { viewBox: `0 0 ${size} ${size}`, width: size, height: size }, paths);
+}
+
+// helper to allow chaining `.also()` on svg elements for setting textContent inline
+SVGElement.prototype.also = function (fn) { fn(this); return this; };
+"use strict";
+
+/* ============================================================
+   SHARED UI PRIMITIVES (vanilla DOM builders)
+   ============================================================ */
+function Card(children, opts) {
+  opts = opts || {};
+  const style = Object.assign({
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: "16px",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.3)", padding: opts.padded === false ? "0" : "16px",
+    display: "flex", flexDirection: "column",
+  }, opts.style || {});
+  return el("div", { className: opts.className || "", style }, children);
+}
+
+function kpiCard(label, value, opts) {
+  opts = opts || {};
+  return Card([
+    el("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" } }, [
+      el("span", { style: { color: C.subtext, fontSize: "12px", fontWeight: "500" } }, label),
+      opts.icon || "",
+    ]),
+    el("span", { style: { color: opts.valueColor || C.text, fontSize: "20px", fontWeight: "700", letterSpacing: "-0.3px", marginTop: "6px" } }, String(value)),
+    opts.sub ? el("span", { style: { color: C.subtext, fontSize: "11px", marginTop: "2px" } }, opts.sub) : null,
+  ], { style: { gap: "0" } });
+}
+
+function sectionTitle(text, action) {
+  return el("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" } }, [
+    el("h2", { style: { color: C.text, fontSize: "15px", fontWeight: "600", margin: "0" } }, text),
+    action || "",
+  ]);
+}
+
+function pill(text, color, bg) {
+  return el("span", {
+    style: { color: color || C.subtext, background: bg || "rgba(148,163,184,0.12)", fontSize: "11px", fontWeight: "600", padding: "2px 8px", borderRadius: "999px", whiteSpace: "nowrap", display: "inline-block" },
+  }, text);
+}
+
+function resultPill(result) {
+  const map = { Win: [C.profit, "rgba(34,197,94,0.14)"], Loss: [C.loss, "rgba(239,68,68,0.14)"], Breakeven: [C.subtext, "rgba(148,163,184,0.14)"] };
+  const [color, bg] = map[result] || map.Breakeven;
+  return pill(result, color, bg);
+}
+
+function detailRow(label, value) {
+  return el("div", { style: { display: "flex", flexDirection: "column" } }, [
+    el("span", { style: { color: C.subtext, fontSize: "10.5px" } }, label),
+    el("span", { style: { color: C.text, fontSize: "12.5px", fontWeight: "600" } }, String(value)),
+  ]);
+}
+
+function grid2(children, gap) {
+  return el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: (gap || 12) + "px" } }, children);
+}
+
+function row(children, opts) {
+  opts = opts || {};
+  return el("div", { style: Object.assign({ display: "flex", flexDirection: "row", alignItems: opts.align || "center", justifyContent: opts.justify || "flex-start", gap: (opts.gap || 0) + "px" }, opts.style || {}) }, children);
+}
+
+function col(children, opts) {
+  opts = opts || {};
+  return el("div", { style: Object.assign({ display: "flex", flexDirection: "column", gap: (opts.gap || 0) + "px" }, opts.style || {}) }, children);
+}
+
+function chip(text, active, onClick) {
+  return el("button", {
+    onClick,
+    style: {
+      padding: "6px 12px", borderRadius: "10px", fontSize: "12px", fontWeight: "500", whiteSpace: "nowrap",
+      background: active ? C.accent : C.card, color: active ? "#0F172A" : C.subtext,
+      border: `1px solid ${active ? C.accent : C.border}`, cursor: "pointer", flexShrink: "0",
+    },
+  }, text);
+}
+
+function textInput(attrs) {
+  attrs = attrs || {};
+  const style = Object.assign({ background: C.card, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "10px 12px", color: C.text, fontSize: "13.5px", width: "100%", outline: "none", boxSizing: "border-box" }, attrs.style || {});
+  const input = el(attrs.tag || "input", Object.assign({}, attrs, { style }));
+  return input;
+}
+
+function fieldLabel(text) {
+  return el("span", { style: { color: C.subtext, fontSize: "12px", fontWeight: "500" } }, text);
+}
+
+function field(labelText, inputNode) {
+  return col([fieldLabel(labelText), inputNode], { gap: 6 });
+}
+
+function toggleSwitch(checked, onClick) {
+  const knob = el("span", { style: { position: "absolute", top: "2px", left: checked ? "21px" : "3px", width: "18px", height: "18px", borderRadius: "999px", background: "#fff", transition: "left 0.15s" } });
+  return el("button", {
+    onClick,
+    style: { width: "42px", height: "24px", borderRadius: "999px", background: checked ? C.accent : C.border, position: "relative", border: "none", cursor: "pointer", padding: "0", transition: "background 0.15s" },
+  }, [knob]);
+}
+
+function primaryButton(text, onClick, opts) {
+  opts = opts || {};
+  const disabled = opts.disabled;
+  return el("button", {
+    onClick: disabled ? null : onClick,
+    disabled,
+    style: {
+      width: "100%", padding: "14px", borderRadius: "12px", fontSize: "14px", fontWeight: "700",
+      background: disabled ? C.border : (opts.bg || C.accent), color: disabled ? C.subtext : (opts.color || "#0F172A"),
+      border: "none", cursor: disabled ? "not-allowed" : "pointer",
+    },
+  }, text);
+}
+
+function ghostButton(text, onClick, opts) {
+  opts = opts || {};
+  return el("button", {
+    onClick,
+    style: Object.assign({
+      width: "100%", padding: "10px", borderRadius: "12px", fontSize: "13px", fontWeight: "600",
+      background: opts.bg || C.cardAlt, color: opts.color || C.accent, border: `1px solid ${opts.borderColor || C.border}`,
+      cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px",
+    }, opts.style || {}),
+  }, opts.icon ? [opts.icon, text] : [text]);
+}
+
+function emptyState(text) {
+  return Card([el("span", { style: { color: C.subtext, fontSize: "13px" } }, text)], { style: { alignItems: "center", padding: "24px 16px" } });
+}
+
+/* ============================================================
+   MODAL / DIALOG SYSTEM (replaces window.prompt/confirm with
+   real in-app styled dialogs)
+   ============================================================ */
+function openOverlay(sheetChildren, opts) {
+  opts = opts || {};
+  const overlay = el("div", { style: { position: "fixed", inset: "0", zIndex: "60", display: "flex", alignItems: opts.center ? "center" : "flex-end", justifyContent: "center", background: "rgba(0,0,0,0.6)", padding: opts.center ? "24px" : "0" } });
+  overlay.addEventListener("click", (e) => { if (e.target === overlay && opts.dismissible !== false) closeIt(); });
+
+  const sheet = el("div", {
+    style: Object.assign({
+      width: "100%", maxWidth: "420px", margin: "0 auto",
+      borderRadius: opts.center ? "20px" : "24px 24px 0 0",
+      display: "flex", flexDirection: "column", background: C.bg,
+      maxHeight: opts.center ? "80vh" : "88vh", border: opts.center ? `1px solid ${C.border}` : "none",
+    }, opts.sheetStyle || {}),
+  }, sheetChildren);
+  sheet.addEventListener("click", (e) => e.stopPropagation());
+
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+
+  function closeIt() { overlay.remove(); }
+  return { overlay, sheet, close: closeIt };
+}
+
+function dialogHeader(title, onClose) {
+  return row([
+    el("span", { style: { color: C.text, fontSize: "16px", fontWeight: "700" } }, title),
+    el("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.x(20, C.subtext)]),
+  ], { justify: "space-between", style: { padding: "18px 20px", borderBottom: `1px solid ${C.border}` } });
+}
+
+/* Text prompt dialog. Returns nothing; calls onSubmit(value) if confirmed. */
+function promptDialog(opts) {
+  opts = opts || {};
+  const state = { value: opts.initialValue || "" };
+  let handle;
+
+  const input = textInput({
+    value: state.value, placeholder: opts.placeholder || "",
+    oninput: (e) => (state.value = e.target.value),
+    style: { fontSize: "15px", padding: "12px 14px" },
+  });
+
+  const errorLabel = el("span", { style: { color: C.loss, fontSize: "12px", display: "none" } });
+
+  function submit() {
+    const v = state.value.trim();
+    if (opts.required !== false && !v) {
+      errorLabel.textContent = opts.errorText || "This field can't be empty.";
+      errorLabel.style.display = "block";
+      return;
+    }
+    handle.close();
+    if (opts.onSubmit) opts.onSubmit(v);
+  }
+
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+
+  const body = col([
+    opts.description ? el("p", { style: { color: C.subtext, fontSize: "12.5px", margin: "0" } }, opts.description) : null,
+    input,
+    errorLabel,
+  ], { gap: 10, style: { padding: "18px 20px" } });
+
+  const footer = row([
+    ghostButton(opts.cancelText || "Cancel", () => handle.close(), { bg: C.cardAlt, color: C.subtext }),
+    primaryButton(opts.submitText || "Save", submit, {}),
+  ], { gap: 10, style: { padding: "16px 20px", borderTop: `1px solid ${C.border}` } });
+
+  handle = openOverlay([dialogHeader(opts.title || "Enter value", () => handle.close()), body, footer], { center: true });
+  setTimeout(() => input.focus && input.focus(), 50);
+  return handle;
+}
+
+/* Confirmation dialog (replaces window.confirm). */
+function confirmDialog(opts) {
+  opts = opts || {};
+  let handle;
+  let resolved = false;
+  const body = col([
+    el("p", { style: { color: C.subtext, fontSize: "13px", margin: "0", lineHeight: "1.6" } }, opts.message || "Are you sure?"),
+  ], { style: { padding: "18px 20px" } });
+
+  function doCancel() {
+    if (resolved) return;
+    resolved = true;
+    handle.close();
+    if (opts.onCancel) opts.onCancel();
+  }
+  function doConfirm() {
+    if (resolved) return;
+    resolved = true;
+    handle.close();
+    if (opts.onConfirm) opts.onConfirm();
+  }
+
+  const footer = row([
+    ghostButton(opts.cancelText || "Cancel", doCancel, { bg: C.cardAlt, color: C.subtext }),
+    primaryButton(opts.confirmText || "Confirm", doConfirm, { bg: opts.danger ? C.loss : C.accent, color: opts.danger ? "#fff" : "#0F172A" }),
+  ], { gap: 10, style: { padding: "16px 20px", borderTop: `1px solid ${C.border}` } });
+
+  handle = openOverlay([dialogHeader(opts.title || "Confirm", doCancel), body, footer], { center: true, dismissible: false });
+  handle.overlay.addEventListener("click", (e) => { if (e.target === handle.overlay) doCancel(); });
+  return handle;
+}
+
+/* Single-select dialog: pick one option from a list (replaces prompt-with-options pattern). */
+function selectDialog(opts) {
+  opts = opts || {};
+  let handle;
+  const optionButtons = opts.options.map((optLabel) =>
+    el("button", {
+      onClick: () => { handle.close(); if (opts.onSelect) opts.onSelect(optLabel); },
+      style: { width: "100%", textAlign: "left", padding: "12px 14px", borderRadius: "10px", background: C.cardAlt, border: `1px solid ${C.border}`, color: C.text, fontSize: "13.5px", cursor: "pointer" },
+    }, optLabel)
+  );
+  const body = col(optionButtons, { gap: 8, style: { padding: "16px 20px" } });
+  handle = openOverlay([dialogHeader(opts.title || "Choose", () => handle.close()), body], { center: true });
+  return handle;
+}
+
+/* ============================================================
+   MEDIA LIGHTBOX — full-screen viewer for a trade's photos/videos
+   ============================================================ */
+function openMediaLightbox(mediaList, startIndex) {
+  let idx = startIndex || 0;
+  const overlay = el("div", { style: { position: "fixed", inset: "0", zIndex: "70", background: "rgba(0,0,0,0.94)", display: "flex", flexDirection: "column" } });
+
+  const topBar = row([
+    el("span", { style: { color: "#fff", fontSize: "12px" } }, `${idx + 1} / ${mediaList.length}`),
+    el("button", { onClick: () => overlay.remove(), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.x(22, "#fff")]),
+  ], { justify: "space-between", style: { padding: "16px 20px" } });
+
+  const viewerWrap = el("div", { style: { flex: "1", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", position: "relative" } });
+
+  function renderCurrent() {
+    clear(viewerWrap);
+    const m = mediaList[idx];
+    const node = m.type.startsWith("video")
+      ? el("video", { src: m.data, controls: true, autoplay: true, style: { maxWidth: "100%", maxHeight: "100%" } })
+      : el("img", { src: m.data, style: { maxWidth: "100%", maxHeight: "100%", objectFit: "contain" } });
+    viewerWrap.appendChild(node);
+    topBar.firstChild.textContent = `${idx + 1} / ${mediaList.length}`;
+  }
+  renderCurrent();
+
+  if (mediaList.length > 1) {
+    const prevBtn = el("button", {
+      onClick: () => { idx = (idx - 1 + mediaList.length) % mediaList.length; renderCurrent(); },
+      style: { position: "absolute", left: "8px", top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", borderRadius: "999px", width: "36px", height: "36px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+    }, [Icons.chevronLeft(20, "#fff")]);
+    const nextBtn = el("button", {
+      onClick: () => { idx = (idx + 1) % mediaList.length; renderCurrent(); },
+      style: { position: "absolute", right: "8px", top: "50%", transform: "translateY(-50%)", background: "rgba(255,255,255,0.15)", border: "none", borderRadius: "999px", width: "36px", height: "36px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
+    }, [Icons.chevronRight(20, "#fff")]);
+    viewerWrap.appendChild(prevBtn);
+    viewerWrap.appendChild(nextBtn);
+  }
+
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+  overlay.appendChild(topBar);
+  overlay.appendChild(viewerWrap);
+  document.body.appendChild(overlay);
+}
+
+/* Estimate the decoded byte size of a base64 data URL and format it human-readable. */
+function estimateDataUrlSize(dataUrl) {
+  const base64 = dataUrl.split(",")[1] || "";
+  const bytes = Math.floor(base64.length * 0.75);
+  return bytes;
+}
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+/* Warn (via confirm dialog) if a file is large enough to strain browser storage.
+   Returns a Promise<boolean> resolved true if the user wants to proceed. */
+function confirmLargeFileIfNeeded(file) {
+  const LARGE_THRESHOLD = 15 * 1024 * 1024; // 15MB
+  if (file.size < LARGE_THRESHOLD) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    confirmDialog({
+      title: "Large File Warning",
+      message: `"${file.name}" is ${formatBytes(file.size)}. Videos and large images are stored directly on this device and can fill up browser storage quickly. Consider trimming long videos before attaching. Continue anyway?`,
+      confirmText: "Attach Anyway",
+      cancelText: "Skip This File",
+      onConfirm: () => resolve(true),
+      onCancel: () => resolve(false),
+    });
+  });
+}
+"use strict";
+
+function renderDashboard(state) {
+  const trades = state.trades;
+  const stats = computeStats(trades);
+
+  const equityValues = trades.map((t) => t.equity);
+  const distribution = [
+    { label: "Win", value: stats.wins, color: C.profit },
+    { label: "Loss", value: stats.losses, color: C.loss },
+    { label: "BE", value: trades.length - stats.wins - stats.losses, color: C.subtext },
+  ];
+  const sessions = SESSION_OPTIONS.map((s) => {
+    const st = trades.filter((t) => t.session === s);
+    return { label: s.replace("London/New York Overlap", "Overlap"), value: Number(st.reduce((a, t) => a + t.pnl, 0).toFixed(0)) };
+  });
+
+  const kpis = grid2([
+    kpiCard("Net Profit", fmtMoney(stats.net), { valueColor: pnlColor(stats.net), icon: Icons.trendUp(14, C.subtext) }),
+    kpiCard("Win Rate", fmtPct(stats.winRate), { icon: Icons.target(14, C.subtext) }),
+    kpiCard("Profit Factor", stats.profitFactor === Infinity ? "\u221e" : stats.profitFactor.toFixed(2), { icon: Icons.activity(14, C.subtext) }),
+    kpiCard("Max Drawdown", fmtMoney(-stats.maxDD), { valueColor: C.loss, icon: Icons.trendDown(14, C.subtext) }),
+  ]);
+
+  const equityCard = Card([sectionTitle("Equity Curve"), areaChart(equityValues, { money: true, height: 160 })]);
+
+  const legendRow = row(distribution.map((d) => row([
+    el("span", { style: { width: "6px", height: "6px", borderRadius: "999px", background: d.color, display: "inline-block" } }),
+    el("span", { style: { fontSize: "11px", color: C.subtext } }, d.label),
+  ], { gap: 4 })), { gap: 12, justify: "center", style: { marginTop: "-4px" } });
+
+  const distCard = Card([
+    sectionTitle("Trade Distribution"),
+    el("div", { style: { display: "flex", justifyContent: "center" } }, [donutChart(distribution)]),
+    legendRow,
+  ]);
+
+  const sessionCard = Card([sectionTitle("By Session"), hBarChart(sessions, { labelWidth: 62 })]);
+
+  const recentTrades = Card([
+    el("div", { style: { padding: "16px 16px 8px" } }, [sectionTitle("Recent Trades")]),
+    col(trades.slice(-6).reverse().map((t) => row([
+      col([
+        el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, t.pair),
+        el("span", { style: { color: C.subtext, fontSize: "11px" } }, `${t.date} \u00b7 ${t.type}`),
+      ], { gap: 2 }),
+      row([
+        resultPill(t.result),
+        el("span", { style: { color: pnlColor(t.pnl), fontSize: "13px", fontWeight: "700", minWidth: "64px", textAlign: "right" } }, t.pnl === 0 ? "\u2014" : fmtMoney(t.pnl)),
+      ], { gap: 8 }),
+    ], { justify: "space-between", style: { padding: "10px 16px", borderTop: `1px solid ${C.border}` } }))),
+  ], { padded: false });
+
+  return col([kpis, equityCard, grid2([distCard, sessionCard]), recentTrades], { gap: 16, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderChecklist(state, actions) {
+  const strategies = state.strategies;
+  if (!state._checklistActiveId || !strategies.find((s) => s.id === state._checklistActiveId)) {
+    state._checklistActiveId = strategies[0] ? strategies[0].id : null;
+  }
+  if (!state._checklistExpanded) state._checklistExpanded = { st1: true };
+
+  const active = strategies.find((s) => s.id === state._checklistActiveId);
+
+  function createStrategyFlow() {
+    promptDialog({
+      title: "New Strategy",
+      description: "Give your trading strategy a name. You can rename it anytime later.",
+      placeholder: "e.g. Breakout Momentum",
+      submitText: "Create",
+      onSubmit: (name) => {
+        const newStrat = { id: uid("s"), name, stages: [] };
+        state.strategies.push(newStrat);
+        state._checklistActiveId = newStrat.id;
+        actions.rerender();
+      },
+    });
+  }
+
+  if (!active) {
+    return Card([
+      el("p", { style: { color: C.subtext, fontSize: "13px", textAlign: "center", margin: "0 0 12px" } }, "No strategy yet."),
+      primaryButton("Create Strategy", createStrategyFlow, {}),
+    ], { style: { alignItems: "center" } });
+  }
+
+  function allTasksOf(strategy) {
+    let tasks = [];
+    strategy.stages.forEach((st) => {
+      if (st.subsections) st.subsections.forEach((sub) => tasks.push(...sub.tasks));
+      else tasks.push(...(st.tasks || []));
+    });
+    return tasks;
+  }
+
+  const allTasks = allTasksOf(active);
+  const completedCount = allTasks.filter((t) => t.done).length;
+  const allDone = allTasks.length > 0 && completedCount === allTasks.length;
+  const progress = allTasks.length ? (completedCount / allTasks.length) * 100 : 0;
+
+  function toggleTask(stageId, taskId, subId) {
+    const stage = active.stages.find((s) => s.id === stageId);
+    if (subId) {
+      const sub = stage.subsections.find((s) => s.id === subId);
+      const t = sub.tasks.find((t) => t.id === taskId);
+      t.done = !t.done;
+    } else {
+      const t = stage.tasks.find((t) => t.id === taskId);
+      t.done = !t.done;
+    }
+    actions.rerender();
+  }
+
+  function addTask(stageId, subId) {
+    promptDialog({
+      title: "New Task",
+      placeholder: "e.g. Confirmed setup matches strategy rules",
+      submitText: "Add Task",
+      onSubmit: (label) => {
+        const stage = active.stages.find((s) => s.id === stageId);
+        const newTask = { id: uid("t"), label, done: false };
+        if (subId) stage.subsections.find((s) => s.id === subId).tasks.push(newTask);
+        else stage.tasks.push(newTask);
+        actions.rerender();
+      },
+    });
+  }
+
+  function editTask(stageId, taskId, subId) {
+    const stage = active.stages.find((s) => s.id === stageId);
+    const list = subId ? stage.subsections.find((s) => s.id === subId).tasks : stage.tasks;
+    const task = list.find((t) => t.id === taskId);
+    promptDialog({
+      title: "Edit Task",
+      initialValue: task.label,
+      submitText: "Save",
+      onSubmit: (label) => { task.label = label; actions.rerender(); },
+    });
+  }
+
+  function deleteTask(stageId, taskId, subId) {
+    confirmDialog({
+      title: "Delete Task",
+      message: "Remove this task from the checklist? This can't be undone.",
+      confirmText: "Delete",
+      danger: true,
+      onConfirm: () => {
+        const stage = active.stages.find((s) => s.id === stageId);
+        if (subId) {
+          const sub = stage.subsections.find((s) => s.id === subId);
+          sub.tasks = sub.tasks.filter((t) => t.id !== taskId);
+        } else {
+          stage.tasks = stage.tasks.filter((t) => t.id !== taskId);
+        }
+        actions.rerender();
+      },
+    });
+  }
+
+  function addStage() {
+    promptDialog({
+      title: "New Stage",
+      placeholder: "e.g. Post-Trade Review",
+      submitText: "Add Stage",
+      onSubmit: (name) => {
+        active.stages.push({ id: uid("st"), name, tasks: [] });
+        actions.rerender();
+      },
+    });
+  }
+
+  function editStageName(stageId) {
+    const stage = active.stages.find((s) => s.id === stageId);
+    promptDialog({
+      title: "Rename Stage",
+      initialValue: stage.name,
+      submitText: "Save",
+      onSubmit: (name) => { stage.name = name; actions.rerender(); },
+    });
+  }
+
+  function deleteStage(stageId) {
+    confirmDialog({
+      title: "Delete Stage",
+      message: "This will remove the stage and all its tasks. This can't be undone.",
+      confirmText: "Delete",
+      danger: true,
+      onConfirm: () => {
+        active.stages = active.stages.filter((s) => s.id !== stageId);
+        actions.rerender();
+      },
+    });
+  }
+
+  function moveStage(idx, dir) {
+    const newIdx = idx + dir;
+    if (newIdx < 0 || newIdx >= active.stages.length) return;
+    const arr = active.stages;
+    [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
+    actions.rerender();
+  }
+
+  function renameStrategy() {
+    promptDialog({
+      title: "Rename Strategy",
+      initialValue: active.name,
+      submitText: "Save",
+      onSubmit: (name) => { active.name = name; actions.rerender(); },
+    });
+  }
+
+  function deleteStrategy() {
+    confirmDialog({
+      title: "Delete Strategy",
+      message: `Delete "${active.name}" and all its stages/tasks? This can't be undone.`,
+      confirmText: "Delete",
+      danger: true,
+      onConfirm: () => {
+        state.strategies = state.strategies.filter((s) => s.id !== active.id);
+        state._checklistActiveId = state.strategies[0] ? state.strategies[0].id : null;
+        actions.rerender();
+      },
+    });
+  }
+
+  function taskRow(task, onToggle, onEdit, onDelete) {
+    return row([
+      el("button", {
+        onClick: onToggle,
+        style: { display: "flex", alignItems: "center", gap: "10px", flex: "1", padding: "6px 0", textAlign: "left", background: "none", border: "none", cursor: "pointer", minWidth: "0" },
+      }, [
+        el("div", { style: { width: "18px", height: "18px", borderRadius: "6px", flexShrink: "0", display: "flex", alignItems: "center", justifyContent: "center", background: task.done ? C.profit : "transparent", border: `1.5px solid ${task.done ? C.profit : C.border}` } }, task.done ? [Icons.check(12, "#0F172A")] : []),
+        el("span", { style: { color: task.done ? C.subtext : C.text, fontSize: "13px", textDecoration: task.done ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, task.label),
+      ]),
+      row([
+        el("button", { onClick: onEdit, style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.file(13, C.subtext)]),
+        el("button", { onClick: onDelete, style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.trash(13, C.loss)]),
+      ], { gap: 2 }),
+    ], { justify: "space-between", gap: 6 });
+  }
+
+  const strategyTabs = row([
+    ...strategies.map((s) => chip(s.name, s.id === active.id, () => { state._checklistActiveId = s.id; actions.rerender(); })),
+    el("button", { onClick: createStrategyFlow, style: { padding: "6px 12px", borderRadius: "10px", background: C.card, border: `1px solid ${C.border}`, cursor: "pointer", display: "flex", alignItems: "center" } }, [Icons.plus(14, C.subtext)]),
+  ], { gap: 8, style: { overflowX: "auto", paddingBottom: "4px" } });
+
+  const strategyHeaderCard = Card([
+    row([
+      el("span", { style: { color: C.text, fontSize: "14px", fontWeight: "700" } }, active.name),
+      row([
+        el("button", { onClick: renameStrategy, style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.file(14, C.subtext)]),
+        el("button", { onClick: deleteStrategy, style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.trash(14, C.loss)]),
+      ], { gap: 4 }),
+    ], { justify: "space-between" }),
+  ], { style: { padding: "12px 14px" } });
+
+  const progressCard = Card([
+    row([
+      el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, "Checklist Progress"),
+      el("span", { style: { color: C.accent, fontSize: "13px", fontWeight: "700" } }, `${completedCount}/${allTasks.length}`),
+    ], { justify: "space-between", style: { marginBottom: "8px" } }),
+    el("div", { style: { width: "100%", borderRadius: "999px", height: "8px", overflow: "hidden", background: C.border } }, [
+      el("div", { style: { height: "100%", borderRadius: "999px", width: progress + "%", background: allDone ? C.profit : C.accent, transition: "width 0.2s" } }),
+    ]),
+  ]);
+
+  const stageCards = active.stages.map((stage, idx) => {
+    const expanded = !!state._checklistExpanded[stage.id];
+    const header = row([
+      el("button", {
+        onClick: () => { state._checklistExpanded[stage.id] = !expanded; actions.rerender(); },
+        style: { display: "flex", alignItems: "center", gap: "8px", flex: "1", textAlign: "left", background: "none", border: "none", cursor: "pointer", padding: "0", minWidth: "0" },
+      }, [
+        expanded ? Icons.chevronDown(16, C.subtext) : Icons.chevronRight(16, C.subtext),
+        el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, `${idx + 1}. ${stage.name}`),
+      ]),
+      row([
+        el("button", { onClick: () => moveStage(idx, -1), style: { opacity: idx === 0 ? "0.3" : "1", background: "none", border: "none", cursor: "pointer", display: "flex" } }, [(() => { const i = Icons.chevronLeft(14, C.subtext); i.style.transform = "rotate(90deg)"; return i; })()]),
+        el("button", { onClick: () => moveStage(idx, 1), style: { opacity: idx === active.stages.length - 1 ? "0.3" : "1", background: "none", border: "none", cursor: "pointer", display: "flex" } }, [(() => { const i = Icons.chevronLeft(14, C.subtext); i.style.transform = "rotate(-90deg)"; return i; })()]),
+        el("button", { onClick: () => editStageName(stage.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.file(14, C.subtext)]),
+        el("button", { onClick: () => deleteStage(stage.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.trash(14, C.loss)]),
+      ], { gap: 4 }),
+    ], { justify: "space-between", style: { padding: "12px 14px" } });
+
+    let body = null;
+    if (expanded) {
+      if (stage.subsections) {
+        body = col(stage.subsections.map((sub) => col([
+          row([
+            el("span", { style: { color: C.accent, fontSize: "11px", fontWeight: "700", textTransform: "uppercase", letterSpacing: "0.5px" } }, sub.name),
+            el("button", { onClick: () => addTask(stage.id, sub.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.plus(13, C.subtext)]),
+          ], { justify: "space-between", style: { marginBottom: "6px" } }),
+          ...(sub.tasks.length ? sub.tasks.map((task) => taskRow(task, () => toggleTask(stage.id, task.id, sub.id), () => editTask(stage.id, task.id, sub.id), () => deleteTask(stage.id, task.id, sub.id))) : [el("span", { style: { color: C.subtext, fontSize: "12px" } }, "No tasks yet.")]),
+        ], { style: { padding: "10px 14px", borderBottom: `1px solid ${C.border}` } })));
+      } else {
+        body = col([
+          row([el("button", { onClick: () => addTask(stage.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.plus(13, C.subtext)])], { justify: "flex-end" }),
+          ...(stage.tasks.length ? stage.tasks.map((task) => taskRow(task, () => toggleTask(stage.id, task.id), () => editTask(stage.id, task.id), () => deleteTask(stage.id, task.id))) : [el("span", { style: { color: C.subtext, fontSize: "12px" } }, "No tasks yet.")]),
+        ], { style: { padding: "8px 14px" } });
+      }
+      body.style.borderTop = `1px solid ${C.border}`;
+    }
+
+    return Card([header, body], { padded: false });
+  });
+
+  const addStageBtn = el("button", {
+    onClick: addStage,
+    style: { display: "flex", alignItems: "center", justifyContent: "center", gap: "6px", padding: "10px", borderRadius: "12px", border: `1px dashed ${C.border}`, color: C.subtext, fontSize: "12px", fontWeight: "600", background: "none", cursor: "pointer" },
+  }, [Icons.plus(14, C.subtext), "Add Stage"]);
+
+  const openJournalBtn = primaryButton(
+    allDone ? "Open Trade Journal" : `Complete all tasks (${completedCount}/${allTasks.length})`,
+    () => actions.navigate("journal"),
+    { disabled: !allDone }
+  );
+
+  const stagesSection = active.stages.length
+    ? col(stageCards, { gap: 10 })
+    : emptyState("No stages yet. Add your first stage below.");
+
+  return col([strategyTabs, strategyHeaderCard, progressCard, stagesSection, addStageBtn, openJournalBtn], { gap: 16, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderJournal(state, actions) {
+  if (state._journalFilterPair === undefined) state._journalFilterPair = "All";
+  if (state._journalFilterStrategy === undefined) state._journalFilterStrategy = "All";
+  if (state._journalFilterAccount === undefined) state._journalFilterAccount = "All";
+  if (state._journalSearch === undefined) state._journalSearch = "";
+  if (state._journalSelected === undefined) state._journalSelected = null;
+
+  const container = col([], { gap: 12, style: { paddingBottom: "16px" } });
+
+  const searchInput = textInput({
+    value: state._journalSearch, placeholder: "Search pair...",
+    style: { background: "transparent", border: "none", padding: "0" },
+  });
+  searchInput.addEventListener("input", (e) => {
+    state._journalSearch = e.target.value;
+    rebuildList();
+  });
+  const searchBox = row([Icons.search(14, C.subtext), searchInput], { gap: 8, style: { padding: "10px 12px", borderRadius: "12px", background: C.card, border: `1px solid ${C.border}` } });
+
+  const pairChips = row([
+    chip("All Pairs", state._journalFilterPair === "All", () => { state._journalFilterPair = "All"; actions.rerender(); }),
+    ...state.symbols.map((p) => chip(p, state._journalFilterPair === p, () => { state._journalFilterPair = p; actions.rerender(); })),
+  ], { gap: 8, style: { overflowX: "auto", paddingBottom: "4px" } });
+
+  const strategyNames = [...new Set(state.trades.map((t) => t.strategy))];
+  const stratChips = row([
+    chip("All Strategies", state._journalFilterStrategy === "All", () => { state._journalFilterStrategy = "All"; actions.rerender(); }),
+    ...strategyNames.map((s) => chip(s, state._journalFilterStrategy === s, () => { state._journalFilterStrategy = s; actions.rerender(); })),
+  ], { gap: 8, style: { overflowX: "auto", paddingBottom: "4px" } });
+
+  const accountNames = state.accounts.map((a) => a.name);
+  const accountChips = row([
+    chip("All Accounts", state._journalFilterAccount === "All", () => { state._journalFilterAccount = "All"; actions.rerender(); }),
+    ...accountNames.map((a) => chip(a, state._journalFilterAccount === a, () => { state._journalFilterAccount = a; actions.rerender(); })),
+  ], { gap: 8, style: { overflowX: "auto", paddingBottom: "4px" } });
+
+  const addBtn = ghostButton("Add Trade Manually", () => actions.openAddTrade(), { icon: Icons.plus(15, C.accent) });
+
+  const listWrap = el("div", {});
+
+  function mediaThumbGrid(mediaArr, onRemove) {
+    const grid = el("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "6px", marginTop: "8px" } });
+    mediaArr.forEach((m, i) => {
+      let thumb;
+      if (m.type.startsWith("video")) {
+        thumb = el("div", { style: { position: "relative", borderRadius: "8px", overflow: "hidden", background: "#000", aspectRatio: "1", cursor: "pointer" } }, [
+          el("video", { src: m.data, style: { width: "100%", height: "100%", objectFit: "cover", pointerEvents: "none" } }),
+          el("div", { style: { position: "absolute", inset: "0", display: "flex", alignItems: "center", justifyContent: "center" } }, [Icons.video(20, "#fff")]),
+        ]);
+      } else {
+        thumb = el("img", { src: m.data, style: { width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: "8px", display: "block", cursor: "pointer" } });
+      }
+      thumb.addEventListener("click", (ev) => { ev.stopPropagation(); openMediaLightbox(mediaArr, i); });
+      const removeBtn = el("button", {
+        onClick: (ev) => { ev.stopPropagation(); onRemove(m); },
+        style: { position: "absolute", top: "2px", right: "2px", width: "18px", height: "18px", borderRadius: "999px", background: "rgba(0,0,0,0.6)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "2" },
+      }, [Icons.x(11, "#fff")]);
+      grid.appendChild(el("div", { style: { position: "relative" } }, [thumb, removeBtn]));
+    });
+    return grid;
+  }
+
+  async function handleMediaFiles(fileList, targetArr, onDone) {
+    const files = Array.from(fileList || []);
+    for (const file of files) {
+      const proceed = await confirmLargeFileIfNeeded(file);
+      if (!proceed) continue;
+      const dataUrl = await readFileAsDataUrl(file);
+      targetArr.push({ id: uid("m"), type: file.type, name: file.name, data: dataUrl });
+    }
+    onDone();
+  }
+
+  function tradeCard(t) {
+    const isOpen = state._journalSelected === t.id;
+    const header = row([
+      col([
+        row([
+          el("span", { style: { color: C.text, fontSize: "14px", fontWeight: "700" } }, t.pair),
+          pill(t.type, t.type === "Buy" ? C.profit : C.loss, t.type === "Buy" ? "rgba(34,197,94,0.12)" : "rgba(239,68,68,0.12)"),
+        ], { gap: 8 }),
+        el("span", { style: { color: C.subtext, fontSize: "11px" } }, `${t.date}${t.time ? " " + t.time : ""} \u00b7 ${t.strategy}${t.account ? " \u00b7 " + t.account : ""}`),
+      ], { gap: 3 }),
+      row([resultPill(t.result), el("span", { style: { color: pnlColor(t.pnl), fontSize: "14px", fontWeight: "700", minWidth: "70px", textAlign: "right" } }, t.pnl === 0 ? "\u2014" : fmtMoney(t.pnl))], { gap: 8 }),
+    ], { justify: "space-between", style: { cursor: "pointer" } });
+    header.addEventListener("click", () => { state._journalSelected = isOpen ? null : t.id; rebuildList(); });
+
+    const children = [header];
+    if (isOpen) {
+      const acc = state.accounts.find((a) => a.name === t.account);
+      const details = el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "12px", paddingTop: "12px", borderTop: `1px solid ${C.border}` } }, [
+        detailRow("Entry Time", t.time || "\u2014"),
+        detailRow("Session", t.session || "\u2014"),
+        detailRow("Entry", t.entry), detailRow("Stop Loss", t.sl), detailRow("Take Profit", t.tp),
+        detailRow("Lot Size", t.lot), detailRow("Risk %", t.risk + "%"), detailRow("Commission", t.commission ? fmtMoney(Number(t.commission)) : "\u2014"),
+        detailRow("Emotion", t.emotion), detailRow("Confidence", `${t.confidence}/5`),
+        detailRow("Account", t.account || "\u2014"),
+        acc && acc.number ? detailRow("Account #", acc.number) : null,
+      ]);
+      if (t.mistakes && t.mistakes.length) {
+        const mistakeWrap = el("div", { style: { gridColumn: "1 / -1", display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "4px" } }, t.mistakes.map((m) => pill(m, C.loss, "rgba(239,68,68,0.12)")));
+        details.appendChild(mistakeWrap);
+      }
+      if (t.specialNotes) {
+        details.appendChild(el("div", { style: { gridColumn: "1 / -1", marginTop: "4px", padding: "10px", borderRadius: "10px", background: "rgba(56,189,248,0.08)", border: `1px solid rgba(56,189,248,0.25)` } }, [
+          el("span", { style: { color: C.accent, fontSize: "10.5px", fontWeight: "700", display: "block", marginBottom: "2px", textTransform: "uppercase", letterSpacing: "0.4px" } }, "Special Notes"),
+          el("span", { style: { color: C.text, fontSize: "12.5px" } }, t.specialNotes),
+        ]));
+      }
+      if (t.notes) {
+        details.appendChild(el("div", { style: { gridColumn: "1 / -1", marginTop: "4px" } }, [
+          el("span", { style: { color: C.subtext, fontSize: "10.5px", display: "block", marginBottom: "2px" } }, "Notes"),
+          el("span", { style: { color: C.text, fontSize: "12.5px" } }, t.notes),
+        ]));
+      }
+      children.push(details);
+
+      const media = t.media || [];
+      const mediaSection = el("div", { style: { marginTop: "12px" } });
+      mediaSection.appendChild(row([
+        row([Icons.image(13, C.subtext), el("span", { style: { color: C.subtext, fontSize: "11px" } }, media.length ? `${media.length} attachment${media.length > 1 ? "s" : ""} \u2014 tap to view` : "No media attached")], { gap: 6 }),
+      ], { justify: "space-between" }));
+
+      if (media.length) mediaSection.appendChild(mediaThumbGrid(media, (m) => { t.media = t.media.filter((x) => x.id !== m.id); actions.rerender(); }));
+
+      const mediaInput = el("input", { type: "file", accept: "image/*,video/*", multiple: true, style: { display: "none" } });
+      mediaInput.addEventListener("change", (e) => {
+        if (!t.media) t.media = [];
+        handleMediaFiles(e.target.files, t.media, () => actions.rerender());
+        e.target.value = "";
+      });
+      mediaSection.appendChild(ghostButton("Add Photo / Video", () => mediaInput.click(), { icon: Icons.upload(13, C.accent), style: { marginTop: "8px", padding: "8px" } }));
+      mediaSection.appendChild(mediaInput);
+
+      children.push(mediaSection);
+    }
+    return Card(children, { style: { padding: "14px" } });
+  }
+
+  function rebuildList() {
+    clear(listWrap);
+    const filtered = state.trades.filter((t) =>
+      (state._journalFilterPair === "All" || t.pair === state._journalFilterPair) &&
+      (state._journalFilterStrategy === "All" || t.strategy === state._journalFilterStrategy) &&
+      (state._journalFilterAccount === "All" || t.account === state._journalFilterAccount) &&
+      (state._journalSearch === "" || t.pair.toLowerCase().includes(state._journalSearch.toLowerCase()))
+    ).slice().reverse();
+    const list = filtered.length ? col(filtered.map(tradeCard), { gap: 8 }) : emptyState("No trades match these filters.");
+    listWrap.appendChild(list);
+  }
+  rebuildList();
+
+  container.appendChild(searchBox);
+  container.appendChild(pairChips);
+  container.appendChild(stratChips);
+  container.appendChild(accountChips);
+  container.appendChild(addBtn);
+  container.appendChild(listWrap);
+
+  return container;
+}
+
+/* Read a File object as a base64 data URL (works fully offline). */
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/* ============================================================
+   ADD TRADE MODAL
+   ============================================================ */
+function openAddTradeModal(state, actions) {
+  const now = new Date();
+  const nowTime = now.toTimeString().slice(0, 8); // HH:MM:SS
+
+  const form = {
+    date: now.toISOString().slice(0, 10), time: nowTime, pair: state.symbols[0], type: "Buy",
+    entry: "", sl: "", tp: "", lot: "", risk: "", commission: "", result: "Win", pnl: "",
+    strategy: (state.strategies[0] && state.strategies[0].name) || "",
+    account: (state.accounts[0] && state.accounts[0].name) || "",
+    session: suggestSession(nowTime), sessionAuto: true,
+    emotion: EMOTIONS[0], confidence: 3, mistakes: [], notes: "", specialNotes: "", media: [],
+  };
+
+  const overlay = el("div", { style: { position: "fixed", inset: "0", zIndex: "50", display: "flex", alignItems: "flex-end", background: "rgba(0,0,0,0.6)" } });
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
+
+  const sheet = el("div", { style: { width: "100%", maxWidth: "480px", margin: "0 auto", borderRadius: "24px 24px 0 0", display: "flex", flexDirection: "column", background: C.bg, maxHeight: "88vh" } });
+  sheet.addEventListener("click", (e) => e.stopPropagation());
+
+  const header = row([
+    el("span", { style: { color: C.text, fontSize: "16px", fontWeight: "700" } }, "New Trade"),
+    el("button", { onClick: closeModal, style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.x(20, C.subtext)]),
+  ], { justify: "space-between", style: { padding: "16px 20px", borderBottom: `1px solid ${C.border}` } });
+
+  const body = el("div", { style: { overflowY: "auto", padding: "16px 20px", display: "flex", flexDirection: "column", gap: "14px" } });
+
+  function segButtons(options, current, onPick, colorFn) {
+    return row(options.map((opt) => {
+      const active = current === opt;
+      const bg = active ? (colorFn ? colorFn(opt) : C.accent) : C.card;
+      const btn = el("button", { style: { flex: "1", padding: "8px", borderRadius: "8px", fontSize: "13px", fontWeight: "600", background: bg, color: active ? "#0F172A" : C.subtext, border: "none", cursor: "pointer" } }, opt);
+      btn.addEventListener("click", () => { onPick(opt); rebuildBody(); });
+      return btn;
+    }), { gap: 8 });
+  }
+
+  function selectField(labelText, options, current, onPick, getLabel) {
+    getLabel = getLabel || ((x) => x);
+    const select = el("select", { style: { background: C.card, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "10px 12px", color: C.text, fontSize: "13.5px", width: "100%" } },
+      options.map((opt) => el("option", { value: getLabel(opt), selected: getLabel(opt) === current }, getLabel(opt))));
+    select.addEventListener("change", (e) => onPick(e.target.value));
+    return field(labelText, select);
+  }
+
+  function rebuildBody() {
+    clear(body);
+    body.appendChild(field("Date", textInput({ type: "date", value: form.date, onchange: (e) => (form.date = e.target.value) })));
+
+    const timeInput = textInput({
+      type: "time", step: "1", value: form.time,
+      onchange: (e) => {
+        form.time = e.target.value;
+        if (form.sessionAuto) form.session = suggestSession(form.time);
+        rebuildBody();
+      },
+    });
+    body.appendChild(field("Entry Time (with seconds)", timeInput));
+
+    body.appendChild(selectField("Pair", state.symbols, form.pair, (v) => (form.pair = v)));
+    body.appendChild(field("Trade Type", segButtons(["Buy", "Sell"], form.type, (v) => (form.type = v), (v) => (v === "Buy" ? C.profit : C.loss))));
+
+    const grid = el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" } }, [
+      field("Entry Price", textInput({ value: form.entry, oninput: (e) => (form.entry = e.target.value) })),
+      field("Lot Size", textInput({ value: form.lot, oninput: (e) => (form.lot = e.target.value) })),
+      field("Stop Loss", textInput({ value: form.sl, oninput: (e) => (form.sl = e.target.value) })),
+      field("Take Profit", textInput({ value: form.tp, oninput: (e) => (form.tp = e.target.value) })),
+      field("Risk %", textInput({ value: form.risk, oninput: (e) => (form.risk = e.target.value) })),
+      field("Commission ($)", textInput({ value: form.commission, placeholder: "-2.50", oninput: (e) => (form.commission = e.target.value) })),
+      field("PnL ($)", textInput({ value: form.pnl, oninput: (e) => (form.pnl = e.target.value) })),
+    ]);
+    body.appendChild(grid);
+
+    // Session: auto-suggested from entry time, but always manually overridable
+    const sessionSelect = el("select", { style: { background: C.card, border: `1px solid ${C.border}`, borderRadius: "10px", padding: "10px 12px", color: C.text, fontSize: "13.5px", width: "100%" } },
+      SESSION_OPTIONS.map((s) => el("option", { value: s, selected: s === form.session }, s)));
+    sessionSelect.addEventListener("change", (e) => { form.session = e.target.value; form.sessionAuto = false; });
+    const sessionRow = col([
+      row([fieldLabel("Session"), form.sessionAuto ? pill("Auto-suggested", C.accent, "rgba(56,189,248,0.14)") : pill("Manual", C.subtext)], { justify: "space-between" }),
+      sessionSelect,
+    ], { gap: 6 });
+    body.appendChild(sessionRow);
+
+    body.appendChild(field("Result", segButtons(["Win", "Loss", "Breakeven"], form.result, (v) => (form.result = v))));
+
+    if (state.strategies.length) {
+      body.appendChild(selectField("Strategy Used", state.strategies, form.strategy, (v) => (form.strategy = v), (s) => s.name));
+    }
+
+    if (state.accounts.length) {
+      body.appendChild(selectField("Trading Account", state.accounts, form.account, (v) => (form.account = v), (a) => a.name));
+    } else {
+      body.appendChild(el("div", { style: { color: C.subtext, fontSize: "11.5px" } }, "No trading accounts yet \u2014 add one in Settings."));
+    }
+
+    body.appendChild(selectField("Emotion Before Trade", EMOTIONS, form.emotion, (v) => (form.emotion = v)));
+
+    const confInput = textInput({ type: "range", min: "1", max: "5", value: form.confidence, oninput: (e) => { form.confidence = Number(e.target.value); confLabel.textContent = `Confidence Level: ${form.confidence}/5`; } });
+    const confLabel = fieldLabel(`Confidence Level: ${form.confidence}/5`);
+    body.appendChild(col([confLabel, confInput], { gap: 6 }));
+
+    const mistakeWrap = row(MISTAKES.map((m) => {
+      const active = form.mistakes.includes(m);
+      const btn = el("button", { style: { padding: "6px 10px", borderRadius: "8px", fontSize: "12px", fontWeight: "500", background: active ? "rgba(239,68,68,0.18)" : C.card, color: active ? C.loss : C.subtext, border: `1px solid ${active ? C.loss : C.border}`, cursor: "pointer" } }, m);
+      btn.addEventListener("click", () => {
+        if (form.mistakes.includes(m)) form.mistakes = form.mistakes.filter((x) => x !== m);
+        else form.mistakes.push(m);
+        rebuildBody();
+      });
+      return btn;
+    }), { gap: 6, style: { flexWrap: "wrap" } });
+    body.appendChild(field("Mistakes (if any)", mistakeWrap));
+
+    const mediaInput = el("input", { type: "file", accept: "image/*,video/*", multiple: true, style: { display: "none" } });
+    mediaInput.addEventListener("change", async (e) => {
+      const files = e.target.files;
+      e.target.value = "";
+      for (const file of Array.from(files || [])) {
+        const proceed = await confirmLargeFileIfNeeded(file);
+        if (!proceed) continue;
+        const dataUrl = await readFileAsDataUrl(file);
+        form.media.push({ id: uid("m"), type: file.type, name: file.name, data: dataUrl });
+        rebuildBody();
+      }
+    });
+    const mediaPreview = form.media.length
+      ? el("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "6px" } }, form.media.map((m, i) => {
+          const thumb = m.type.startsWith("video")
+            ? el("div", { style: { position: "relative", borderRadius: "8px", overflow: "hidden", background: "#000", aspectRatio: "1", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" } }, [Icons.video(16, "#fff")])
+            : el("img", { src: m.data, style: { width: "100%", aspectRatio: "1", objectFit: "cover", borderRadius: "8px", display: "block", cursor: "pointer" } });
+          thumb.addEventListener("click", (ev) => { ev.stopPropagation(); openMediaLightbox(form.media, i); });
+          const removeBtn = el("button", {
+            onClick: (ev) => { ev.stopPropagation(); form.media = form.media.filter((x) => x.id !== m.id); rebuildBody(); },
+            style: { position: "absolute", top: "2px", right: "2px", width: "16px", height: "16px", borderRadius: "999px", background: "rgba(0,0,0,0.6)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "2" },
+          }, [Icons.x(10, "#fff")]);
+          return el("div", { style: { position: "relative" } }, [thumb, removeBtn]);
+        }))
+      : null;
+    body.appendChild(field("Trade Screenshots / Videos", col([
+      ghostButton("Upload photo or video", () => mediaInput.click(), { icon: Icons.image(15, C.subtext), style: { border: `1px dashed ${C.border}`, background: "none" } }),
+      mediaInput,
+      mediaPreview,
+      el("span", { style: { color: C.subtext, fontSize: "10.5px" } }, "Tip: keep videos short \u2014 large files use more of your device's browser storage."),
+    ], { gap: 8 })));
+
+    body.appendChild(field("Special Notes", textInput({ tag: "textarea", rows: 2, value: form.specialNotes, placeholder: "Anything important to flag about this trade...", oninput: (e) => (form.specialNotes = e.target.value), style: { resize: "none", borderColor: "rgba(56,189,248,0.4)" } })));
+
+    body.appendChild(field("Trade Notes", textInput({ tag: "textarea", rows: 3, value: form.notes, placeholder: "What did you observe?", oninput: (e) => (form.notes = e.target.value), style: { resize: "none" } })));
+  }
+  rebuildBody();
+
+  const footer = el("div", { style: { padding: "16px 20px", borderTop: `1px solid ${C.border}` } }, [
+    primaryButton("Save Trade", () => {
+      actions.saveTrade({
+        id: uid("T"), ...form, pnl: Number(form.pnl) || 0,
+        day: new Date(form.date).toLocaleDateString("en-US", { weekday: "short" }),
+        hour: Number((form.time || "9").split(":")[0]), equity: 0,
+      });
+      closeModal();
+    }),
+  ]);
+
+  sheet.appendChild(header);
+  sheet.appendChild(body);
+  sheet.appendChild(footer);
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+
+  function closeModal() { overlay.remove(); }
+}
+"use strict";
+
+function renderImport(state, actions) {
+  if (state._importFormat === undefined) state._importFormat = "MT4";
+  if (state._importStatus === undefined) state._importStatus = "idle";
+
+  const formatChips = row(["CSV", "Excel", "MT4", "MT5"].map((f) => chip(f, state._importFormat === f, () => { state._importFormat = f; actions.rerender(); })), { gap: 8 });
+
+  function simulateImport() {
+    state._importStatus = "parsing";
+    actions.rerender();
+    setTimeout(() => {
+      const fmt = state._importFormat;
+      const fakeImported = Array.from({ length: 5 }).map((_, i) => ({
+        id: uid("IMP"), date: new Date().toISOString().slice(0, 10), pair: state.symbols[i % state.symbols.length],
+        type: i % 2 === 0 ? "Buy" : "Sell", entry: (1.1 + i * 0.01).toFixed(4), sl: "\u2014", tp: "\u2014",
+        lot: (0.5 + i * 0.1).toFixed(2), risk: "1.0", commission: "-2.00", result: i % 3 === 0 ? "Loss" : "Win",
+        pnl: i % 3 === 0 ? -45.2 : 112.4, equity: 0, strategy: "Imported", session: "London", hour: 10, day: "Mon",
+        emotion: "Neutral", confidence: 3, mistakes: [], notes: `Imported from ${fmt} statement`,
+        account: (state.accounts[0] && state.accounts[0].name) || "", media: [],
+      }));
+      actions.importTrades(fakeImported);
+      state._importStatus = "done";
+      actions.rerender();
+    }, 1200);
+  }
+
+  const dropZone = el("div", { style: { borderRadius: "12px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "8px", padding: "40px 16px", border: `1.5px dashed ${C.border}` } }, [
+    Icons.upload(26, C.accent),
+    el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, `Drop your ${state._importFormat} statement here`),
+    el("span", { style: { color: C.subtext, fontSize: "11px" } }, "or tap to browse files"),
+    el("button", {
+      onClick: simulateImport, disabled: state._importStatus === "parsing",
+      style: { marginTop: "8px", padding: "8px 20px", borderRadius: "8px", fontSize: "12px", fontWeight: "700", background: C.accent, color: "#0F172A", border: "none", cursor: "pointer" },
+    }, state._importStatus === "parsing" ? "Parsing..." : "Select File"),
+  ]);
+
+  const uploadCard = Card([sectionTitle("Upload Trading Statement"), formatChips, el("div", { style: { marginTop: "12px" } }, [dropZone])]);
+
+  const statusBlocks = [];
+  if (state._importStatus === "parsing") {
+    statusBlocks.push(Card([row([Icons.refresh(16, C.accent), el("span", { style: { color: C.text, fontSize: "13px" } }, `Parsing ${state._importFormat} statement and extracting trades...`)], { gap: 12 })]));
+  }
+  if (state._importStatus === "done") {
+    statusBlocks.push(Card([
+      row([Icons.check(16, C.profit), el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, "5 trades imported successfully")], { gap: 8, style: { marginBottom: "4px" } }),
+      el("span", { style: { color: C.subtext, fontSize: "12px" } }, "New entries have been added to your Journal."),
+    ]));
+  }
+
+  const fieldsCard = Card([
+    sectionTitle("Fields Extracted"),
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px" } },
+      ["Date", "Symbol", "Trade Type", "Volume", "Entry Price", "Exit Price", "Profit", "Commission", "Swap", "Trade Duration"].map((f) =>
+        row([Icons.check(12, C.profit), el("span", { style: { color: C.subtext, fontSize: "12px" } }, f)], { gap: 6 })
+      )
+    ),
+  ]);
+
+  return col([uploadCard, ...statusBlocks, fieldsCard], { gap: 16, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderAnalytics(state) {
+  const trades = state.trades;
+  const stats = computeStats(trades);
+
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri"];
+  const dayPerf = days.map((d) => ({ label: d, value: Number(trades.filter((t) => t.day === d).reduce((a, t) => a + t.pnl, 0).toFixed(0)) }));
+
+  const hourBuckets = {};
+  trades.forEach((t) => { hourBuckets[t.hour] = (hourBuckets[t.hour] || 0) + t.pnl; });
+  const hourPerf = Object.entries(hourBuckets).map(([h, v]) => ({ label: h + "h", value: Number(v.toFixed(0)) })).sort((a, b) => Number(a.label) - Number(b.label));
+
+  const stratGroups = {};
+  trades.forEach((t) => {
+    stratGroups[t.strategy] = stratGroups[t.strategy] || { wins: 0, total: 0, pnl: 0 };
+    stratGroups[t.strategy].total++;
+    stratGroups[t.strategy].pnl += t.pnl;
+    if (t.result === "Win") stratGroups[t.strategy].wins++;
+  });
+  const stratPerf = Object.entries(stratGroups).map(([name, g]) => ({ name, winRate: Math.round((g.wins / g.total) * 100), pnl: Number(g.pnl.toFixed(0)) }));
+
+  const mistakeGroups = {};
+  trades.forEach((t) => t.mistakes.forEach((m) => {
+    mistakeGroups[m] = mistakeGroups[m] || { count: 0, pnl: 0 };
+    mistakeGroups[m].count++;
+    mistakeGroups[m].pnl += t.pnl;
+  }));
+  const mistakeImpact = Object.entries(mistakeGroups).map(([name, g]) => ({ name, count: g.count, pnl: Number(g.pnl.toFixed(0)) })).sort((a, b) => b.count - a.count);
+
+  const emoGroups = {};
+  trades.forEach((t) => {
+    emoGroups[t.emotion] = emoGroups[t.emotion] || { pnl: 0, count: 0 };
+    emoGroups[t.emotion].pnl += t.pnl;
+    emoGroups[t.emotion].count++;
+  });
+  const emotionPerf = Object.entries(emoGroups).map(([name, g]) => ({ label: name, value: Number((g.pnl / g.count).toFixed(0)) }));
+
+  const bestDay = dayPerf.reduce((a, b) => (b.value > a.value ? b : a), dayPerf[0]);
+  const worstDay = dayPerf.reduce((a, b) => (b.value < a.value ? b : a), dayPerf[0]);
+  const bestStrat = stratPerf.reduce((a, b) => (b.winRate > a.winRate ? b : a), stratPerf[0] || { name: "\u2014", winRate: 0 });
+
+  const kpis = grid2([
+    kpiCard("Net Profit", fmtMoney(stats.net), { valueColor: pnlColor(stats.net) }),
+    kpiCard("Win Rate", fmtPct(stats.winRate)),
+    kpiCard("Profit Factor", stats.profitFactor === Infinity ? "\u221e" : stats.profitFactor.toFixed(2)),
+    kpiCard("Recovery Factor", stats.recoveryFactor.toFixed(2)),
+    kpiCard("Total Trades", stats.total),
+    kpiCard("Win/Loss Ratio", stats.winLossRatio.toFixed(2)),
+  ]);
+
+  const dayCard = Card([
+    sectionTitle("Best & Worst Day"),
+    barChart(dayPerf),
+    row([
+      el("span", { style: { color: C.subtext, fontSize: "11px" } }, ["Best: ", el("span", { style: { color: C.profit, fontWeight: "700" } }, bestDay.label)]),
+      el("span", { style: { color: C.subtext, fontSize: "11px" } }, ["Worst: ", el("span", { style: { color: C.loss, fontWeight: "700" } }, worstDay.label)]),
+    ], { justify: "space-between", style: { marginTop: "4px" } }),
+  ]);
+
+  const hourCard = Card([sectionTitle("Performance by Hour"), barChart(hourPerf, { height: 130 })]);
+
+  const stratCard = Card([
+    sectionTitle("Strategy Comparison"),
+    ...stratPerf.map((s) => row([
+      col([
+        el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, s.name),
+        s.name === bestStrat.name ? pill("Highest Win Rate", C.accent, "rgba(56,189,248,0.14)") : null,
+      ], { gap: 4 }),
+      col([
+        el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "700" } }, s.winRate + "%"),
+        el("span", { style: { color: pnlColor(s.pnl), fontSize: "11px" } }, fmtMoney(s.pnl)),
+      ], { style: { alignItems: "flex-end" } }),
+    ], { justify: "space-between", style: { padding: "8px 0", borderTop: `1px solid ${C.border}` } })),
+  ]);
+
+  const mistakeCard = Card([
+    sectionTitle("Mistake Analytics"),
+    mistakeImpact.length === 0
+      ? el("span", { style: { color: C.subtext, fontSize: "12px" } }, "No mistakes tagged yet.")
+      : col(mistakeImpact.map((m) => row([
+          row([Icons.alert(13, C.loss), el("span", { style: { color: C.text, fontSize: "13px" } }, m.name)], { gap: 8 }),
+          row([el("span", { style: { color: C.subtext, fontSize: "11px" } }, m.count + "x"), el("span", { style: { color: pnlColor(m.pnl), fontSize: "12px", fontWeight: "700" } }, fmtMoney(m.pnl))], { gap: 12 }),
+        ], { justify: "space-between", style: { padding: "8px 0", borderTop: `1px solid ${C.border}` } }))),
+  ]);
+
+  const emoCard = Card([sectionTitle("Emotion vs Performance"), hBarChart(emotionPerf, { labelWidth: 70 })]);
+
+  return col([kpis, dayCard, hourCard, stratCard, mistakeCard, emoCard], { gap: 16, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderNews(state) {
+  const impactColor = { High: C.loss, Medium: C.warn, Low: C.subtext };
+  const banner = Card([row([Icons.globe(15, C.accent), el("span", { style: { color: C.subtext, fontSize: "12px" } }, "Calendar will sync automatically from Forex Factory / Investing.com")], { gap: 10 })]);
+
+  const eventCards = state.newsEvents.map((ev) => Card([
+    row([
+      row([pill(ev.currency, C.accent, "rgba(56,189,248,0.14)"), el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, ev.event)], { gap: 8 }),
+      pill(ev.impact, impactColor[ev.impact], impactColor[ev.impact] + "22"),
+    ], { justify: "space-between", style: { marginBottom: "8px" } }),
+    row([Icons.calendar(11, C.subtext), el("span", { style: { color: C.subtext, fontSize: "11px" } }, ev.date)], { gap: 6, style: { marginBottom: "10px" } }),
+    el("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", marginBottom: "10px" } }, [
+      detailRow("Forecast", ev.forecast), detailRow("Previous", ev.previous), detailRow("Actual", ev.actual),
+    ]),
+    ghostButton("Attach chart reaction screenshot", () => {}, { icon: Icons.image(13, C.subtext), style: { border: `1px dashed ${C.border}`, background: "none" } }),
+  ]));
+
+  return col([banner, ...eventCards], { gap: 12, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderEducation(state, actions) {
+  if (state._eduTab === undefined) state._eduTab = "notes";
+  const fileIconFn = { pdf: Icons.file, image: Icons.image, video: Icons.video };
+
+  const tabs = row(["notes", "files"].map((t) => {
+    const active = state._eduTab === t;
+    const btn = el("button", { style: { flex: "1", padding: "10px", borderRadius: "12px", fontSize: "13px", fontWeight: "600", textTransform: "capitalize", background: active ? C.accent : C.card, color: active ? "#0F172A" : C.subtext, border: `1px solid ${active ? C.accent : C.border}`, cursor: "pointer" } }, t);
+    btn.addEventListener("click", () => { state._eduTab = t; actions.rerender(); });
+    return btn;
+  }), { gap: 8 });
+
+  function addNote() {
+    const title = window.prompt("Note title:");
+    if (!title) return;
+    const body = window.prompt("Note content:") || "";
+    const category = window.prompt(`Category (${EDU_CATEGORIES.join(", ")}):`) || "Strategy Notes";
+    state.eduNotes.unshift({ id: uid("e"), category, title, body });
+    actions.rerender();
+  }
+  function deleteNote(id) { state.eduNotes = state.eduNotes.filter((n) => n.id !== id); actions.rerender(); }
+
+  function addFile() {
+    const name = window.prompt("File name (e.g. My Strategy.pdf):");
+    if (!name) return;
+    const ext = name.split(".").pop().toLowerCase();
+    const type = ["png", "jpg", "jpeg", "gif"].includes(ext) ? "image" : (ext === "mp4" || ext === "mov") ? "video" : "pdf";
+    state.eduFiles.unshift({ id: uid("f"), name, type, size: "\u2014" });
+    actions.rerender();
+  }
+  function deleteFile(id) { state.eduFiles = state.eduFiles.filter((f) => f.id !== id); actions.rerender(); }
+
+  let content;
+  if (state._eduTab === "notes") {
+    const addBtn = ghostButton("New Note", addNote, { icon: Icons.plus(15, C.accent) });
+    const notes = state.eduNotes.length === 0
+      ? emptyState("No notes yet.")
+      : col(state.eduNotes.map((n) => Card([
+          row([pill(n.category, C.accent, "rgba(56,189,248,0.14)"), el("button", { onClick: () => deleteNote(n.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.trash(14, C.loss)])], { justify: "space-between" }),
+          el("div", { style: { color: C.text, fontSize: "14px", fontWeight: "600", marginTop: "8px" } }, n.title),
+          el("div", { style: { color: C.subtext, fontSize: "12.5px", marginTop: "4px" } }, n.body),
+        ])), { gap: 10 });
+    content = col([addBtn, notes], { gap: 10 });
+  } else {
+    const addBtn = ghostButton("Upload File", addFile, { icon: Icons.upload(15, C.accent) });
+    const files = state.eduFiles.length === 0
+      ? emptyState("No files yet.")
+      : col(state.eduFiles.map((f) => Card([
+          row([
+            el("div", { style: { width: "38px", height: "38px", borderRadius: "10px", flexShrink: "0", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(56,189,248,0.12)" } }, [fileIconFn[f.type](17, C.accent)]),
+            col([el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, f.name), el("span", { style: { color: C.subtext, fontSize: "11px" } }, f.size)], { gap: 2, style: { flex: "1" } }),
+            el("button", { onClick: () => deleteFile(f.id), style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.trash(14, C.loss)]),
+          ], { gap: 12 }),
+        ], { style: { flexDirection: "row", alignItems: "center" } })), { gap: 10 });
+    content = col([addBtn, files], { gap: 10 });
+  }
+
+  return col([tabs, content], { gap: 12, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+function renderSettings(state, actions) {
+  if (state._newSymbolInput === undefined) state._newSymbolInput = "";
+  if (state._importStatusMsg === undefined) state._importStatusMsg = null;
+
+  const langCard = Card([
+    sectionTitle("Language"),
+    row(["English", "Persian"].map((l) => {
+      const active = state.settings.lang === l;
+      const btn = el("button", { style: { flex: "1", padding: "8px", borderRadius: "8px", fontSize: "13px", fontWeight: "500", background: active ? C.accent : C.cardAlt, color: active ? "#0F172A" : C.subtext, border: "none", cursor: "pointer" } }, l);
+      btn.addEventListener("click", () => { state.settings.lang = l; actions.rerender(); });
+      return btn;
+    }), { gap: 8 }),
+  ]);
+
+  const themeCard = Card([
+    sectionTitle("Theme"),
+    row(["Dark", "Light"].map((t) => {
+      const active = state.settings.theme === t;
+      const icon = t === "Dark" ? Icons.moon(14, active ? "#0F172A" : C.subtext) : Icons.sun(14, active ? "#0F172A" : C.subtext);
+      const btn = el("button", { style: { flex: "1", padding: "8px", borderRadius: "8px", fontSize: "13px", fontWeight: "500", background: active ? C.accent : C.cardAlt, color: active ? "#0F172A" : C.subtext, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: "6px" } }, [icon, t]);
+      btn.addEventListener("click", () => { state.settings.theme = t; actions.rerender(); });
+      return btn;
+    }), { gap: 8 }),
+    state.settings.theme === "Light" ? row([Icons.alert(12, C.subtext), el("span", { style: { color: C.subtext, fontSize: "11px" } }, "Light mode preview not yet built \u2014 saved for later.")], { gap: 6, style: { marginTop: "8px" } }) : null,
+  ]);
+
+  const lockCard = Card([
+    row([
+      row([Icons.lock(16, C.accent), col([el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, "App Lock"), el("span", { style: { color: C.subtext, fontSize: "11px" } }, "PIN or biometric authentication")], { gap: 2 })], { gap: 10 }),
+      toggleSwitch(state.settings.pin, () => { state.settings.pin = !state.settings.pin; actions.rerender(); }),
+    ], { justify: "space-between" }),
+  ]);
+
+  const fileInput = el("input", { type: "file", accept: ".json,application/json", style: { display: "none" } });
+  fileInput.addEventListener("change", async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const data = await importFromFile(file);
+      state.trades = data.trades || [];
+      state.strategies = data.strategies && data.strategies.length ? data.strategies : DEFAULT_STRATEGIES;
+      state.symbols = data.symbols && data.symbols.length ? data.symbols : PAIRS;
+      state.eduNotes = data.eduNotes || [];
+      state.eduFiles = data.eduFiles || [];
+      state.settings = data.settings || { lang: "English", theme: "Dark", pin: false };
+      state.accounts = data.accounts && data.accounts.length ? data.accounts : DEFAULT_ACCOUNTS.slice();
+      state._importStatusMsg = { ok: true, message: "Backup restored successfully." };
+    } catch (err) {
+      state._importStatusMsg = { ok: false, message: "Could not read that file. Make sure it's a valid backup .json." };
+    }
+    actions.rerender();
+    setTimeout(() => { state._importStatusMsg = null; actions.rerender(); }, 5000);
+  });
+
+  const dataCard = Card([
+    sectionTitle("Data Management"),
+    row([Icons.checklist(12, C.profit), el("span", { style: { color: C.subtext, fontSize: "11.5px" } }, "All data is saved automatically on this device.")], { gap: 6, style: { marginBottom: "4px" } }),
+    ghostButton("Export Backup File (.json)", () => exportToFile({ trades: state.trades, strategies: state.strategies, symbols: state.symbols, eduNotes: state.eduNotes, eduFiles: state.eduFiles, newsEvents: state.newsEvents, settings: state.settings, accounts: state.accounts }), { icon: Icons.download(14, C.text), color: C.text }),
+    ghostButton("Import Backup File (.json)", () => fileInput.click(), { icon: Icons.upload(14, C.text), color: C.text }),
+    fileInput,
+    state._importStatusMsg ? row([state._importStatusMsg.ok ? Icons.check(13, C.profit) : Icons.alert(13, C.loss), el("span", { style: { color: state._importStatusMsg.ok ? C.profit : C.loss, fontSize: "12px" } }, state._importStatusMsg.message)], { gap: 6 }) : null,
+    el("div", { style: { color: C.subtext, fontSize: "11px", lineHeight: "1.5" } }, "Export creates a single file with all your trades, strategies, notes and settings. Move that file to another device (e.g. via email, USB, or cloud storage) and use Import there to bring everything over."),
+  ], { style: { gap: "10px" } });
+
+  const symbolChips = row(state.symbols.map((s) => row([
+    el("span", { style: { color: C.text, fontSize: "12px", fontWeight: "600" } }, s),
+    el("button", { onClick: () => { state.symbols = state.symbols.filter((x) => x !== s); actions.rerender(); }, style: { background: "none", border: "none", cursor: "pointer", display: "flex" } }, [Icons.x(12, C.subtext)]),
+  ], { gap: 6, style: { padding: "6px 10px", borderRadius: "8px", background: C.cardAlt } })), { gap: 8, style: { flexWrap: "wrap" } });
+
+  const symbolInputRow = row([
+    textInput({ value: state._newSymbolInput, placeholder: "e.g. USDCAD", oninput: (e) => (state._newSymbolInput = e.target.value), style: { flex: "1" } }),
+    el("button", {
+      onClick: () => {
+        if (!state._newSymbolInput.trim()) return;
+        state.symbols.push(state._newSymbolInput.trim().toUpperCase());
+        state._newSymbolInput = "";
+        actions.rerender();
+      },
+      style: { padding: "0 16px", borderRadius: "10px", background: C.accent, color: "#0F172A", border: "none", cursor: "pointer", display: "flex", alignItems: "center" },
+    }, [Icons.plus(16, "#0F172A")]),
+  ], { gap: 8 });
+
+  const symbolsCard = Card([sectionTitle("Trading Symbols"), symbolChips, symbolInputRow], { style: { gap: "12px" } });
+
+  function openAccountDialog(existing) {
+    const form = { name: existing ? existing.name : "", number: existing ? existing.number : "", broker: existing ? existing.broker : "" };
+    let handle;
+    const nameInput = textInput({ value: form.name, placeholder: "e.g. Main Account", oninput: (e) => (form.name = e.target.value) });
+    const numberInput = textInput({ value: form.number, placeholder: "e.g. 1024578", oninput: (e) => (form.number = e.target.value) });
+    const brokerInput = textInput({ value: form.broker, placeholder: "e.g. IC Markets", oninput: (e) => (form.broker = e.target.value) });
+    const errorLabel = el("span", { style: { color: C.loss, fontSize: "12px", display: "none" } });
+
+    const bodyEl = col([
+      field("Account Name", nameInput),
+      field("Account Number", numberInput),
+      field("Broker (optional)", brokerInput),
+      errorLabel,
+    ], { gap: 12, style: { padding: "18px 20px" } });
+
+    function submit() {
+      if (!form.name.trim()) { errorLabel.textContent = "Account name is required."; errorLabel.style.display = "block"; return; }
+      if (existing) {
+        existing.name = form.name.trim(); existing.number = form.number.trim(); existing.broker = form.broker.trim();
+      } else {
+        state.accounts.push({ id: uid("acc"), name: form.name.trim(), number: form.number.trim(), broker: form.broker.trim() });
+      }
+      handle.close();
+      actions.rerender();
+    }
+
+    const footer = row([
+      ghostButton("Cancel", () => handle.close(), { bg: C.cardAlt, color: C.subtext }),
+      primaryButton(existing ? "Save" : "Add Account", submit, {}),
+    ], { gap: 10, style: { padding: "16px 20px", borderTop: `1px solid ${C.border}` } });
+
+    handle = openOverlay([dialogHeader(existing ? "Edit Account" : "New Trading Account", () => handle.close()), bodyEl, footer], { center: true });
+  }
+
+  function deleteAccount(acc) {
+    confirmDialog({
+      title: "Delete Account",
+      message: `Delete "${acc.name}"? Trades already logged under this account will keep the account name as text, but it will no longer appear as a selectable option.`,
+      confirmText: "Delete", danger: true,
+      onConfirm: () => { state.accounts = state.accounts.filter((a) => a.id !== acc.id); actions.rerender(); },
+    });
+  }
+
+  const accountRows = state.accounts.length
+    ? col(state.accounts.map((acc) => Card([
+        row([
+          col([
+            el("span", { style: { color: C.text, fontSize: "13px", fontWeight: "600" } }, acc.name),
+            el("span", { style: { color: C.subtext, fontSize: "11px" } }, [acc.number ? "# " + acc.number : "No account number", acc.broker ? " \u00b7 " + acc.broker : ""].join("")),
+          ], { gap: 2 }),
+          row([
+            el("button", { onClick: () => openAccountDialog(acc), style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.file(14, C.subtext)]),
+            el("button", { onClick: () => deleteAccount(acc), style: { background: "none", border: "none", cursor: "pointer", display: "flex", padding: "4px" } }, [Icons.trash(14, C.loss)]),
+          ], { gap: 4 }),
+        ], { justify: "space-between" }),
+      ], { style: { padding: "12px 14px" } })), { gap: 8 })
+    : emptyState("No trading accounts yet.");
+
+  const accountsCard = Card([
+    sectionTitle("Trading Accounts"),
+    accountRows,
+    ghostButton("Add Trading Account", () => openAccountDialog(null), { icon: Icons.plus(14, C.accent), style: { marginTop: "10px" } }),
+  ], { style: { gap: "10px" } });
+
+  return col([langCard, themeCard, lockCard, dataCard, accountsCard, symbolsCard], { gap: 12, style: { paddingBottom: "16px" } });
+}
+"use strict";
+
+const NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", icon: Icons.dashboard },
+  { id: "checklist", label: "Checklist", icon: Icons.checklist },
+  { id: "journal", label: "Journal", icon: Icons.journal },
+  { id: "import", label: "Import", icon: Icons.upload },
+  { id: "analytics", label: "Analytics", icon: Icons.analytics },
+  { id: "news", label: "News", icon: Icons.news },
+  { id: "education", label: "Education", icon: Icons.education },
+  { id: "settings", label: "Settings", icon: Icons.settings },
+];
+
+function createApp(rootEl) {
+  const state = {
+    page: "dashboard",
+    loaded: false,
+    trades: [],
+    strategies: DEFAULT_STRATEGIES,
+    symbols: PAIRS.slice(),
+    eduNotes: EDU_NOTES.slice(),
+    eduFiles: EDU_FILES.slice(),
+    newsEvents: NEWS_EVENTS.slice(),
+    settings: { lang: "English", theme: "Dark", pin: false },
+    accounts: DEFAULT_ACCOUNTS.slice(),
+  };
+  let saveTimer = null;
+
+  function scheduleSave() {
+    if (!state.loaded) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveAppState({
+        trades: state.trades, strategies: state.strategies, symbols: state.symbols,
+        eduNotes: state.eduNotes, eduFiles: state.eduFiles, newsEvents: state.newsEvents, settings: state.settings,
+        accounts: state.accounts,
+      });
+    }, 400);
+  }
+
+  const actions = {
+    rerender: () => { render(); scheduleSave(); },
+    navigate: (page) => { state.page = page; render(); },
+    openAddTrade: () => openAddTradeModal(state, actions),
+    saveTrade: (trade) => {
+      const lastEquity = state.trades.length ? state.trades[state.trades.length - 1].equity : 10000;
+      state.trades.push(Object.assign({}, trade, { equity: lastEquity + trade.pnl }));
+      render(); scheduleSave();
+    },
+    importTrades: (newTrades) => {
+      let eq = state.trades.length ? state.trades[state.trades.length - 1].equity : 10000;
+      newTrades.forEach((t) => { eq += t.pnl; t.equity = eq; });
+      state.trades.push(...newTrades);
+      scheduleSave();
+    },
+  };
+
+  function buildHeader() {
+    const title = (NAV_ITEMS.find((n) => n.id === state.page) || {}).label || "";
+    return row([
+      col([
+        el("span", { style: { color: C.subtext, fontSize: "10.5px", fontWeight: "600", letterSpacing: "0.6px", textTransform: "uppercase" } }, "FX Discipline"),
+        el("span", { style: { color: C.text, fontSize: "18px", fontWeight: "700" } }, title),
+      ], { gap: 2 }),
+      row([
+        el("span", { style: { width: "7px", height: "7px", borderRadius: "999px", background: C.profit, display: "inline-block" } }),
+        el("span", { style: { color: C.text, fontSize: "12px", fontWeight: "600" } }, "Saved on device"),
+      ], { gap: 8, style: { padding: "6px 10px", borderRadius: "999px", background: C.card, border: `1px solid ${C.border}` } }),
+    ], { justify: "space-between", style: { padding: "16px", borderBottom: `1px solid ${C.border}`, position: "sticky", top: "0", background: C.bg, zIndex: "30" } });
+  }
+
+  function buildNav() {
+    const bar = row(NAV_ITEMS.map((item) => {
+      const active = state.page === item.id;
+      const btn = el("button", {
+        style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "4px", flexShrink: "0", minWidth: "64px", padding: "4px", background: "none", border: "none", cursor: "pointer" },
+      }, [item.icon(19, active ? C.accent : C.subtext), el("span", { style: { fontSize: "9.5px", fontWeight: active ? "700" : "500", color: active ? C.accent : C.subtext } }, item.label)]);
+      btn.addEventListener("click", () => actions.navigate(item.id));
+      return btn;
+    }), { gap: 0, style: { overflowX: "auto", padding: "8px 4px" } });
+    return el("div", { style: { position: "fixed", bottom: "0", left: "0", right: "0", zIndex: "40", maxWidth: "480px", margin: "0 auto", background: "rgba(15,23,42,0.97)", borderTop: `1px solid ${C.border}`, backdropFilter: "blur(8px)" } }, [bar]);
+  }
+
+  function buildPage() {
+    switch (state.page) {
+      case "dashboard": return renderDashboard(state);
+      case "checklist": return renderChecklist(state, actions);
+      case "journal": return renderJournal(state, actions);
+      case "import": return renderImport(state, actions);
+      case "analytics": return renderAnalytics(state);
+      case "news": return renderNews(state);
+      case "education": return renderEducation(state, actions);
+      case "settings": return renderSettings(state, actions);
+      default: return el("div", {}, "Unknown page");
+    }
+  }
+
+  function render() {
+    clear(rootEl);
+
+    if (!state.loaded) {
+      rootEl.appendChild(el("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", gap: "12px" } }, [
+        el("div", { style: { width: "32px", height: "32px", borderRadius: "50%", border: `3px solid ${C.border}`, borderTopColor: C.accent, animation: "spin 0.8s linear infinite" } }),
+        el("span", { style: { color: C.subtext, fontSize: "13px" } }, "Loading your data\u2026"),
+      ]));
+      return;
+    }
+
+    const shell = el("div", { style: { maxWidth: "480px", margin: "0 auto", minHeight: "100vh", position: "relative", paddingBottom: "78px" } }, [
+      buildHeader(),
+      el("div", { style: { padding: "16px" } }, [buildPage()]),
+      buildNav(),
+    ]);
+    rootEl.appendChild(shell);
+  }
+
+  async function init() {
+    const saved = await loadAppState();
+    if (saved) {
+      state.trades = saved.trades || [];
+      state.strategies = saved.strategies && saved.strategies.length ? saved.strategies : DEFAULT_STRATEGIES;
+      state.symbols = saved.symbols && saved.symbols.length ? saved.symbols : PAIRS.slice();
+      state.eduNotes = saved.eduNotes || [];
+      state.eduFiles = saved.eduFiles || [];
+      state.settings = saved.settings || { lang: "English", theme: "Dark", pin: false };
+      state.accounts = saved.accounts && saved.accounts.length ? saved.accounts : DEFAULT_ACCOUNTS.slice();
+    } else {
+      state.trades = genTrades();
+    }
+    state.loaded = true;
+    render();
+  }
+
+  render(); // show loading spinner immediately
+  init();
+
+  return { state, render };
+}
+
+try {
+  window.__bootOk = true;
+  createApp(document.getElementById("root"));
+} catch (err) {
+  showBootError(String(err && err.stack ? err.stack : err));
+}
+</script>
+</body>
+</html>
