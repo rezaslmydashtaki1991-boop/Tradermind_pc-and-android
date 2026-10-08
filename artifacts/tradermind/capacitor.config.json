@@ -1,0 +1,8 @@
+{
+  "appId": "com.tradermind.journal",
+  "appName": "TraderMind",
+  "webDir": "dist/public",
+  "server": {
+    "androidScheme": "https"
+  }
+}
