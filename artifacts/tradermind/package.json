@@ -8,6 +8,7 @@
     "dev": "vite --config vite.config.ts --host 0.0.0.0",
     "build": "pnpm run build:web",
     "build:web": "vite build --config vite.config.ts",
+    "build:capacitor": "vite build --config vite.capacitor.config.ts",
     "build:android:debug": "node ./scripts/build-android.mjs",
     "build:windows:x64": "node ./scripts/build-windows.mjs",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",

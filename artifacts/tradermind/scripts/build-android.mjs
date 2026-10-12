@@ -34,7 +34,7 @@ if (!process.env.ANDROID_HOME && !process.env.ANDROID_SDK_ROOT) {
   process.exit(1);
 }
 
-run(pnpm, ['run', 'build:web']);
+run(pnpm, ['run', 'build:capacitor']);
 
 if (
   !existsSync(path.join(androidDir, 'gradlew')) &&
