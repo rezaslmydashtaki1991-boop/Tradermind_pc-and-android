@@ -6,6 +6,8 @@ import { defineConfig } from 'vitest/config';
 import path from 'path';
 
 export default defineConfig({
+  // JSX automatic: تست‌های کامپوننت نیازی به import React ندارند (مثل Vite)
+  esbuild: { jsx: 'automatic' },
   test: {
     globals: true,
     environment: 'jsdom',

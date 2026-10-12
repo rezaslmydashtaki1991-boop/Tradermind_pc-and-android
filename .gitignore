@@ -2,15 +2,12 @@
 
 # compiled output
 dist
+artifacts/*/dist-electron
 tmp
 out-tsc
 *.tsbuildinfo
 .expo
 .expo-shared
-
-# Generated Android project and machine-local SDK configuration
-artifacts/tradermind/android/
-artifacts/tradermind/local.properties
 
 # dependencies
 node_modules

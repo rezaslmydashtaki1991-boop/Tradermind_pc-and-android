@@ -8,17 +8,37 @@ import {
   journalSessionService,
 } from '../services/journalSessionService';
 import {
+  ANALYSIS_FLEXIBLE_FIELD_KEYS,
+  clampAnalysisFieldRows,
+  DEFAULT_ANALYSIS_FIELD_LAYOUTS,
   getJournalAnalysisFieldLabels,
+  getJournalAnalysisFieldLayouts,
   JOURNAL_ANALYSIS_FIELD_LABELS,
+  MAX_ANALYSIS_FIELD_ROWS,
+  MIN_ANALYSIS_FIELD_ROWS,
   saveJournalAnalysisFieldLabels,
+  saveJournalAnalysisFieldLayouts,
+  type AnalysisFieldKind,
+  type AnalysisFieldLayouts,
+  type AnalysisFlexibleFieldKey,
   type JournalAnalysisFieldKey,
   type JournalAnalysisFieldLabels,
 } from '../services/journalAnalysisFieldLabels';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
+
+/** فیلدهایی که فقط عنوانشان قابل ویرایش است (نوع و اندازهٔ آن‌ها ثابت است). */
+const FIXED_ANALYSIS_FIELD_KEYS: readonly JournalAnalysisFieldKey[] = [
+  'expectedDirectionOptionId', 'notes', 'previousTradeId', 'nextTradeId', 'tags',
+];
+
+const toAsciiDigits = (value: string) => value
+  .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)))
+  .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));
 
 export default function JournalConfiguration() {
   const [categoryId, setCategoryId] = useState<string>(JOURNAL_OPTION_CATEGORIES[0].id);
@@ -32,6 +52,9 @@ export default function JournalConfiguration() {
   const [analysisFieldLabels, setAnalysisFieldLabels] = useState<JournalAnalysisFieldLabels>(
     JOURNAL_ANALYSIS_FIELD_LABELS,
   );
+  const [fieldLayouts, setFieldLayouts] = useState<AnalysisFieldLayouts>(DEFAULT_ANALYSIS_FIELD_LAYOUTS);
+  // متن خام تعداد خط‌ها: تا زمان ذخیره، ورودی فارسی/کیبورد صوتی پاک نمی‌شود.
+  const [rowsText, setRowsText] = useState<Record<string, string>>({});
 
   const categoryLabel = useMemo(
     () => JOURNAL_OPTION_CATEGORIES.find(category => category.id === categoryId)?.label ?? categoryId,
@@ -51,7 +74,12 @@ export default function JournalConfiguration() {
   }, [categoryId]);
 
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { setAnalysisFieldLabels(getJournalAnalysisFieldLabels()); }, []);
+  useEffect(() => {
+    setAnalysisFieldLabels(getJournalAnalysisFieldLabels());
+    const layouts = getJournalAnalysisFieldLayouts();
+    setFieldLayouts(layouts);
+    setRowsText(Object.fromEntries(ANALYSIS_FLEXIBLE_FIELD_KEYS.map(key => [key, String(layouts[key].rows)])));
+  }, []);
 
   const resetForm = () => {
     setEditingId(null);
@@ -112,7 +140,15 @@ export default function JournalConfiguration() {
     try {
       saveJournalAnalysisFieldLabels(analysisFieldLabels);
       setAnalysisFieldLabels(getJournalAnalysisFieldLabels());
-      toast.success('عنوان فیلدهای رویداد تحلیل ذخیره شد.');
+      const nextLayouts = Object.fromEntries(ANALYSIS_FLEXIBLE_FIELD_KEYS.map(key => [key, {
+        ...fieldLayouts[key],
+        rows: clampAnalysisFieldRows(toAsciiDigits(rowsText[key] ?? ''), fieldLayouts[key].rows),
+      }])) as AnalysisFieldLayouts;
+      saveJournalAnalysisFieldLayouts(nextLayouts);
+      const saved = getJournalAnalysisFieldLayouts();
+      setFieldLayouts(saved);
+      setRowsText(Object.fromEntries(ANALYSIS_FLEXIBLE_FIELD_KEYS.map(key => [key, String(saved[key].rows)])));
+      toast.success('عنوان و چیدمان فیلدهای رویداد تحلیل ذخیره شد.');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'ذخیرهٔ عنوان فیلدها انجام نشد.');
     }
@@ -132,18 +168,67 @@ export default function JournalConfiguration() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">عنوان فیلدهای رویداد تحلیل</CardTitle>
-          <CardDescription>نام کادرهای متنی، فهرست‌ها و گزینه‌های چندانتخابی را در رویداد تحلیل سشن شخصی‌سازی کنید.</CardDescription>
+          <CardTitle className="text-base">فیلدهای رویداد تحلیل</CardTitle>
+          <CardDescription>برای هر فیلد، عنوان، نوع (کادر متنی یا چک‌باکس) و تعداد خط‌های کادر را تعیین کنید. اندازهٔ کادر متنی را داخل خود تحلیل هم می‌توانید با دکمه‌های + و − یا کشیدن گوشهٔ کادر تغییر دهید.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-5">
+          <div className="space-y-3">
+            {ANALYSIS_FLEXIBLE_FIELD_KEYS.map((key: AnalysisFlexibleFieldKey) => {
+              const layout = fieldLayouts[key];
+              return (
+                <div key={key} className="grid gap-3 rounded-lg border p-3 sm:grid-cols-2 lg:grid-cols-[1.4fr_1fr_.7fr_1.2fr]" data-testid={`config-analysis-field-${key}`}>
+                  <label className="space-y-1.5 text-sm">
+                    <span className="text-muted-foreground">عنوان ({JOURNAL_ANALYSIS_FIELD_LABELS[key]})</span>
+                    <Input
+                      value={analysisFieldLabels[key]}
+                      onChange={event => setAnalysisFieldLabels(current => ({ ...current, [key]: event.target.value }))}
+                      aria-label={`عنوان فیلد ${JOURNAL_ANALYSIS_FIELD_LABELS[key]}`}
+                      maxLength={100}
+                      data-testid={`input-analysis-field-label-${key}`}
+                    />
+                  </label>
+                  <div className="space-y-1.5 text-sm">
+                    <span className="text-muted-foreground">نوع فیلد</span>
+                    <Select value={layout.kind} onValueChange={value => setFieldLayouts(current => ({ ...current, [key]: { ...current[key], kind: value as AnalysisFieldKind } }))}>
+                      <SelectTrigger data-testid={`select-analysis-field-kind-${key}`}><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="text">کادر متنی</SelectItem>
+                        <SelectItem value="checkbox">چک‌باکس</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <label className="space-y-1.5 text-sm">
+                    <span className="text-muted-foreground">تعداد خط ({MIN_ANALYSIS_FIELD_ROWS}–{MAX_ANALYSIS_FIELD_ROWS})</span>
+                    <Input
+                      inputMode="numeric"
+                      value={rowsText[key] ?? ''}
+                      onChange={event => setRowsText(current => ({ ...current, [key]: event.target.value }))}
+                      disabled={layout.kind === 'checkbox'}
+                      aria-label={`تعداد خط ${JOURNAL_ANALYSIS_FIELD_LABELS[key]}`}
+                      data-testid={`input-analysis-field-rows-${key}`}
+                    />
+                  </label>
+                  <div className="space-y-1.5 text-sm">
+                    <span className="text-muted-foreground">گزینه‌های چک‌باکس</span>
+                    <Select value={layout.optionCategory} onValueChange={value => setFieldLayouts(current => ({ ...current, [key]: { ...current[key], optionCategory: value } }))} disabled={layout.kind !== 'checkbox'}>
+                      <SelectTrigger data-testid={`select-analysis-field-category-${key}`}><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {JOURNAL_OPTION_CATEGORIES.map(category => <SelectItem key={category.id} value={category.id}>{category.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {(Object.entries(JOURNAL_ANALYSIS_FIELD_LABELS) as [JournalAnalysisFieldKey, string][]).map(([key, defaultLabel]) => (
+            {FIXED_ANALYSIS_FIELD_KEYS.map(key => (
               <label key={key} className="space-y-1.5 text-sm">
-                <span className="text-muted-foreground">{defaultLabel}</span>
+                <span className="text-muted-foreground">{JOURNAL_ANALYSIS_FIELD_LABELS[key]}</span>
                 <Input
                   value={analysisFieldLabels[key]}
                   onChange={event => setAnalysisFieldLabels(current => ({ ...current, [key]: event.target.value }))}
-                  aria-label={`عنوان فیلد ${defaultLabel}`}
+                  aria-label={`عنوان فیلد ${JOURNAL_ANALYSIS_FIELD_LABELS[key]}`}
                   maxLength={100}
                   data-testid={`input-analysis-field-label-${key}`}
                 />
@@ -151,7 +236,7 @@ export default function JournalConfiguration() {
             ))}
           </div>
           <Button onClick={saveAnalysisLabels} className="gap-2" data-testid="button-save-analysis-field-labels">
-            <Save className="h-4 w-4" />ذخیرهٔ عنوان‌ها
+            <Save className="h-4 w-4" />ذخیرهٔ عنوان‌ها و چیدمان
           </Button>
         </CardContent>
       </Card>

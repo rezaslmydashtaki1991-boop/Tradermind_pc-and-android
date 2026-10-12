@@ -1,3 +1,5 @@
+import { runAsRemote } from '../db/syncSupport';
+import { stableOptionId } from '../db/defaultIds';
 import {
   db,
   type Account,
@@ -13,6 +15,8 @@ import {
   type Trade,
 } from '../db/database';
 import { getNetPnl, isBreakEven, isClosed, isLoss, isWin } from '../lib/tradeHelpers';
+import { isTradingBoxAvailableForAccount } from './tradingBoxService';
+import { triggerAnalysisIds } from '../lib/triggerAnalysis';
 
 export const JOURNAL_OPTION_CATEGORIES = [
   { id: 'timeframe', label: 'بازهٔ زمانی' },
@@ -40,6 +44,7 @@ export const JOURNAL_OPTION_CATEGORIES = [
   { id: 'session_event_type', label: 'رویداد بدون معامله' },
   { id: 'sco_type', label: 'نوع شکست ساختار (SCO)' },
   { id: 'fvg_type', label: 'نوع شکاف ارزش منصفانه (FVG)' },
+  { id: 'forward_zone', label: 'نواحی پیش رو' },
 ] as const;
 
 export type JournalOptionCategory = typeof JOURNAL_OPTION_CATEGORIES[number]['id'];
@@ -70,7 +75,10 @@ const DEFAULT_OPTIONS: Record<JournalOptionCategory, string[]> = {
   session_event_type: ['ستاپ معتبر، بدون معامله', 'معاملهٔ ازدست‌رفته', 'ستاپ نامعتبر', 'ستاپ مشاهده‌شده'],
   sco_type: [],
   fvg_type: [],
+  forward_zone: ['High مینور', 'Low مینور', 'High ماژور', 'Low ماژور', 'تمام سطوح دارای نقدینگی'],
 };
+
+const LATE_ADDED_OPTION_CATEGORIES: readonly JournalOptionCategory[] = ['forward_zone'];
 
 const DEFAULT_OPTION_TRANSLATIONS: Record<string, string> = {
   'Daily': 'روزانه',
@@ -285,6 +293,11 @@ function psychologyHasOption(value: string | undefined, optionId: string): boole
   }
 }
 
+/** گزینه‌ی پیش‌فرض: شناسه‌ی قطعی + updatedAt صفر تا هیچ‌وقت نسخه‌ی ویرایش‌شده را بازنویسی نکند */
+function seedOption(category: string, label: string, sortOrder: number, now: number): JournalOption {
+  return { ...optionRecord(category, label, sortOrder, now), id: stableOptionId(category, label), updatedAt: 0 } as JournalOption;
+}
+
 function optionRecord(
   category: string,
   label: string,
@@ -370,15 +383,33 @@ async function createVersionSnapshot(strategyId: string): Promise<StrategyVersio
   };
 }
 
+export { triggerAnalysisIds };
+
+async function assertAnalysesBelongToSession(analysisIds: string[], sessionId: string): Promise<void> {
+  for (const analysisId of analysisIds) {
+    const analysis = await db.journalSessionAnalyses.get(analysisId);
+    if (!analysis || analysis.sessionId !== sessionId) throw new Error('تحلیل انتخاب‌شده به این سشن تعلق ندارد.');
+  }
+}
+
 export const journalSessionService = {
   async ensureDefaultOptions(): Promise<void> {
     await db.transaction('rw', db.journalOptions, async () => {
-      if (await db.journalOptions.count()) return;
       const now = Date.now();
-      const records = Object.entries(DEFAULT_OPTIONS).flatMap(([category, labels]) =>
-        labels.map((label, index) => optionRecord(category, label, index, now)),
-      );
-      if (records.length) await db.journalOptions.bulkAdd(records);
+      if (!(await db.journalOptions.count())) {
+        const records = Object.entries(DEFAULT_OPTIONS).flatMap(([category, labels]) =>
+          labels.map((label, index) => seedOption(category, label, index, now)),
+        );
+        if (records.length) await runAsRemote(() => db.journalOptions.bulkAdd(records));
+        return;
+      }
+      // دسته‌هایی که بعد از ساخت دیتابیس به برنامه اضافه شده‌اند (مثل «نواحی پیش رو»)
+      // برای کاربران قدیمی هم یک‌بار با گزینه‌های پیش‌فرض ساخته می‌شوند.
+      for (const category of LATE_ADDED_OPTION_CATEGORIES) {
+        if (await db.journalOptions.where('category').equals(category).count()) continue;
+        const labels = DEFAULT_OPTIONS[category];
+        if (labels.length) await runAsRemote(() => db.journalOptions.bulkAdd(labels.map((label, index) => seedOption(category, label, index, now))));
+      }
     });
   },
 
@@ -447,7 +478,7 @@ export const journalSessionService = {
     ]);
     if (!account || account.isArchived) throw new Error('حساب فعال و معتبری انتخاب نشده است.');
     if (!box || box.status !== 'active') throw new Error('باکس معاملاتی فعال و معتبری انتخاب نشده است.');
-    if (box.accountId && box.accountId !== account.id) throw new Error('این باکس متعلق به حساب انتخاب‌شده نیست.');
+    if (!isTradingBoxAvailableForAccount(box, account)) throw new Error('این باکس برای حساب انتخاب‌شده مجاز نیست.');
     if (!strategy) throw new Error('استراتژی انتخاب‌شده پیدا نشد.');
     const symbols = [...new Set(input.symbols.map(value => value.trim().toUpperCase()).filter(Boolean))];
     if (symbols.length !== 1) throw new Error('هر سشن باید دقیقاً یک نماد داشته باشد.');
@@ -551,16 +582,35 @@ export const journalSessionService = {
       const linkedTrade = await db.trades.get(tradeId);
       if (!linkedTrade || linkedTrade.journalSessionId !== input.sessionId) throw new Error('معاملهٔ پیوندشده به این سشن تعلق ندارد.');
     }
-    const now = Date.now();
+    if (input.scenarioOutcomeOptionId) {
+      const outcome = await db.journalOptions.get(input.scenarioOutcomeOptionId);
+      if (!outcome || outcome.category !== 'scenario_outcome') throw new Error('نتیجهٔ سناریوی انتخاب‌شده معتبر نیست.');
+    }
+    let now = Date.now();
+    let createdAt = existing?.createdAt ?? now;
+    if (!existing) {
+      // ترتیب ساخت رویدادها همان ترتیب انتخاب تایم‌فریم‌هاست؛ پس زمان ساخت باید
+      // حتی در یک میلی‌ثانیهٔ مشترک هم اکیداً صعودی باشد.
+      const siblings = await db.journalSessionAnalyses.where('sessionId').equals(input.sessionId).toArray();
+      const latest = siblings.reduce((max, item) => Math.max(max, item.createdAt), 0);
+      if (latest >= now) now = latest + 1;
+      createdAt = now;
+    }
     const record: JournalSessionAnalysis = {
       ...input,
       id: existing?.id ?? uid(),
-      createdAt: existing?.createdAt ?? now,
+      createdAt,
       updatedAt: now,
       analysisText: input.analysisText ?? '',
       marketContext: input.marketContext ?? '',
       scenario: input.scenario ?? '',
       triggerContext: input.triggerContext ?? '',
+      momentumText: input.momentumText ?? '',
+      pricePositionText: input.pricePositionText ?? '',
+      directionLogicText: input.directionLogicText ?? '',
+      fieldSelections: input.fieldSelections ?? '{}',
+      scenarioOutcomeOptionId: input.scenarioOutcomeOptionId ?? null,
+      scenarioOutcomeNote: input.scenarioOutcomeNote ?? '',
       previousTradeId: input.previousTradeId ?? null,
       nextTradeId: input.nextTradeId ?? null,
     };
@@ -580,7 +630,16 @@ export const journalSessionService = {
     const analysis = await db.journalSessionAnalyses.get(id);
     if (!analysis) return;
     await db.transaction('rw', db.journalSessionAnalyses, db.journalTriggerEvents, db.journalMedia, async () => {
-      await db.journalTriggerEvents.where('analysisEventId').equals(id).modify({ analysisEventId: null });
+      const sessionTriggers = await db.journalTriggerEvents.where('sessionId').equals(analysis.sessionId).toArray();
+      for (const trigger of sessionTriggers) {
+        const ids = triggerAnalysisIds(trigger);
+        if (!ids.includes(id)) continue;
+        const remaining = ids.filter(analysisId => analysisId !== id);
+        await db.journalTriggerEvents.update(trigger.id, {
+          analysisEventIds: remaining,
+          analysisEventId: remaining[0] ?? null,
+        });
+      }
       await db.journalMedia.where('analysisId').equals(id).modify({ analysisId: null, category: 'session' });
       await db.journalSessionAnalyses.delete(id);
     });
@@ -591,21 +650,26 @@ export const journalSessionService = {
       status?: JournalTriggerEvent['status'];
     },
   ): Promise<JournalTriggerEvent> {
-    const [session, timeframe, analysis, triggerType, direction] = await Promise.all([
+    const [session, timeframe, triggerType, direction] = await Promise.all([
       db.journalSessions.get(input.sessionId),
       db.journalOptions.get(input.timeframeOptionId),
-      input.analysisEventId ? db.journalSessionAnalyses.get(input.analysisEventId) : Promise.resolve(undefined),
       input.triggerTypeOptionId ? db.journalOptions.get(input.triggerTypeOptionId) : Promise.resolve(undefined),
       input.directionOptionId ? db.journalOptions.get(input.directionOptionId) : Promise.resolve(undefined),
     ]);
     if (!session) throw new Error('سشن پیدا نشد.');
     if (!timeframe || timeframe.category !== 'timeframe' || !timeframe.enabled) throw new Error('تایم‌فریم معتبر و فعالی انتخاب نشده است.');
-    if (input.analysisEventId && (!analysis || analysis.sessionId !== session.id)) throw new Error('تحلیل انتخاب‌شده به این سشن تعلق ندارد.');
+    const analysisEventIds = [...new Set([
+      ...(input.analysisEventIds ?? []),
+      ...(input.analysisEventId ? [input.analysisEventId] : []),
+    ])];
+    await assertAnalysesBelongToSession(analysisEventIds, session.id);
     if (input.triggerTypeOptionId && (!triggerType || triggerType.category !== 'entry_trigger' || !triggerType.enabled)) throw new Error('نوع تریگر معتبر نیست.');
     if (input.directionOptionId && (!direction || direction.category !== 'direction' || !direction.enabled)) throw new Error('جهت انتخاب‌شده معتبر نیست.');
     const now = Date.now();
     const event: JournalTriggerEvent = {
       ...input,
+      analysisEventId: input.analysisEventId ?? analysisEventIds[0] ?? null,
+      analysisEventIds,
       id: uid(),
       status: input.status ?? 'pending',
       linkedTradeId: null,
@@ -626,6 +690,7 @@ export const journalSessionService = {
       | 'notes'
       | 'timeframeOptionId'
       | 'analysisEventId'
+      | 'analysisEventIds'
       | 'triggerTypeOptionId'
       | 'description'
       | 'marketMovement'
@@ -644,6 +709,11 @@ export const journalSessionService = {
     if ('analysisEventId' in patch && patch.analysisEventId) {
       const analysis = await db.journalSessionAnalyses.get(patch.analysisEventId);
       if (!analysis || analysis.sessionId !== event.sessionId) throw new Error('تحلیل انتخاب‌شده به این سشن تعلق ندارد.');
+    }
+    if ('analysisEventIds' in patch) {
+      patch = { ...patch, analysisEventIds: [...new Set(patch.analysisEventIds ?? [])] };
+      await assertAnalysesBelongToSession(patch.analysisEventIds ?? [], event.sessionId);
+      patch.analysisEventId = patch.analysisEventIds?.[0] ?? null;
     }
     if ('triggerTypeOptionId' in patch && patch.triggerTypeOptionId) {
       const option = await db.journalOptions.get(patch.triggerTypeOptionId);
@@ -674,7 +744,7 @@ export const journalSessionService = {
         if (!trade) throw new Error('معاملهٔ پیوندخورده به تریگر پیدا نشد.');
         const tradePatch: Partial<Trade> = {};
 
-        if ('analysisEventId' in patch) {
+        if ('analysisEventId' in patch || 'analysisEventIds' in patch) {
           tradePatch.journalAnalysisEventId = patch.analysisEventId ?? null;
         }
 
@@ -764,7 +834,7 @@ export const journalSessionService = {
       const tradePatch: Partial<Trade> = {
         journalSessionId: trigger.sessionId,
         journalTriggerEventId: trigger.id,
-        journalAnalysisEventId: trigger.analysisEventId,
+        journalAnalysisEventId: trigger.analysisEventId ?? triggerAnalysisIds(trigger)[0] ?? null,
         accountId: trade.accountId ?? session.accountId,
         boxId: trade.boxId ?? session.tradingBoxId,
         strategyId: trade.strategyId ?? session.strategyId,

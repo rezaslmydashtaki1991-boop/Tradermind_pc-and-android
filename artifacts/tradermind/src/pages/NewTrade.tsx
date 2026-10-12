@@ -4,7 +4,7 @@ import { tradeService } from "../services/tradeService";
 import { analysisService } from "../services/analysisService";
 import { strategyService } from "../services/strategyService";
 import { accountService } from "../services/accountService";
-import { tradingBoxService } from "../services/tradingBoxService";
+import { isTradingBoxAvailableForAccount, tradingBoxService } from "../services/tradingBoxService";
 import { db, Trade, Strategy, AnalysisSession, Account, TradingBox, MTFScenario } from "../db/database";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
@@ -332,7 +332,9 @@ export default function NewTrade() {
   const [isSaving, setIsSaving] = useState(false);
   const [showSavedIndicator, setShowSavedIndicator] = useState(false);
   const [allTrades, setAllTrades] = useState<Trade[]>([]);
-  const [isQuickMode, setIsQuickMode] = useState(false);
+  const [isQuickMode, setIsQuickMode] = useState(
+    searchParams.get('quick') === 'true' || (isNewTrade && !editId) || Boolean(journalTriggerId),
+  );
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [tradingBoxes, setTradingBoxes] = useState<TradingBox[]>([]);
@@ -344,6 +346,7 @@ export default function NewTrade() {
   const [newScenarioTimeframe, setNewScenarioTimeframe] = useState('');
   const journalCustomTags = useAppStore(s => s.journalCustomTags);
   const journalCustomEmotions = useAppStore(s => s.journalCustomEmotions);
+  const tradeAutosave = useAppStore(s => s.tradeAutosave);
 
   useEffect(() => {
     db.trades.toArray().then(setAllTrades);
@@ -393,6 +396,12 @@ export default function NewTrade() {
   const tradeIdRef = useRef<string | null>(editId || idFromUrl || null);
   const lastSavedRef = useRef<Trade | null>(null);
   const initialized = useRef(false);
+  const tradeReadyRef = useRef(false);
+  const isNewDraftRef = useRef(false);
+  const cancelBeforeCreateRef = useRef(false);
+  const discardInProgressRef = useRef(false);
+  const savePromiseRef = useRef<Promise<boolean> | null>(null);
+  const draftMarkerKey = 'tradermind-new-trade-draft';
   // Tracks the last set of URL params we initialized for — re-init when they change
   const lastInitKey = useRef<string>('__unset__');
   const requestNavigation = useGuardedNavigation();
@@ -408,6 +417,10 @@ export default function NewTrade() {
 
     // Reset state for fresh initialization
     initialized.current = false;
+    tradeReadyRef.current = false;
+    isNewDraftRef.current = false;
+    cancelBeforeCreateRef.current = false;
+    discardInProgressRef.current = false;
     tradeIdRef.current = editId || idFromUrl || null;
     lastSavedRef.current = null;
     setTrade(null);
@@ -427,6 +440,7 @@ export default function NewTrade() {
         const existing = await tradeService.getTradeById(requestedTradeId);
         if (existing) {
           currentTrade = existing;
+          isNewDraftRef.current = !editId && sessionStorage.getItem(draftMarkerKey) === existing.id;
         }
       } 
       
@@ -440,10 +454,17 @@ export default function NewTrade() {
           return;
         }
 
+        if (cancelBeforeCreateRef.current) return;
         currentTrade = await tradeService.createTrade({
           sessionId: sessionId || null,
           journalSessionId: journalSessionId || null,
         });
+        if (cancelBeforeCreateRef.current) {
+          await tradeService.deleteTrade(currentTrade.id);
+          return;
+        }
+        isNewDraftRef.current = true;
+        sessionStorage.setItem(draftMarkerKey, currentTrade.id);
         tradeIdRef.current = currentTrade.id;
         // Update URL so a page refresh reloads this draft (doesn't go through Wouter
         // to avoid a re-render loop; query string is only used for recovery on refresh)
@@ -465,6 +486,11 @@ export default function NewTrade() {
           currentTrade = await tradeService.getTradeById(currentTrade.id) ?? currentTrade;
         } catch (error) {
           toast.error(error instanceof Error ? error.message : 'پیوند تریگر به معامله انجام نشد.');
+          if (!requestedTradeId) {
+            try { await tradeService.deleteTrade(currentTrade.id); } catch { /* preserve the original link error */ }
+            isNewDraftRef.current = false;
+            sessionStorage.removeItem(draftMarkerKey);
+          }
           if (journalSessionId) setLocation(`/journal/sessions/${journalSessionId}`);
           return;
         }
@@ -482,6 +508,7 @@ export default function NewTrade() {
       }
 
       setTrade(currentTrade);
+      tradeReadyRef.current = true;
       setPositionSizeInput(
         currentTrade.positionSize != null && !POSITION_SIZE_OPTIONS.includes(currentTrade.positionSize)
           ? String(currentTrade.positionSize)
@@ -572,6 +599,7 @@ export default function NewTrade() {
   };
 
   const saveTrade = useCallback(async (dataToSave: Trade, source: 'manual' | 'autosave' | 'navigation' = 'autosave') => {
+    if (discardInProgressRef.current) return false;
     if (!dataToSave.id) {
       toast.error('شناسهٔ معامله برای ذخیره پیدا نشد؛ معاملهٔ جدیدی ساخته نشد.');
       console.error('[TradeSave] rejected UPDATE without trade ID', { source });
@@ -585,38 +613,73 @@ export default function NewTrade() {
       operationId,
       timestamp: Date.now(),
     });
-    setIsSaving(true);
+    const operation = (async () => {
+      setIsSaving(true);
+      try {
+        const saved = await tradeService.updateTrade(dataToSave.id, dataToSave);
+        if (!saved) {
+          toast.error('معامله برای به‌روزرسانی پیدا نشد؛ رکورد تازه‌ای ساخته نشد.');
+          return false;
+        }
+        lastSavedRef.current = saved;
+        if (source !== 'autosave' && isNewDraftRef.current) {
+          isNewDraftRef.current = false;
+          sessionStorage.removeItem(draftMarkerKey);
+        }
+        setShowSavedIndicator(true);
+        setTimeout(() => setShowSavedIndicator(false), 2000);
+        return true;
+      } catch (error) {
+        console.error('[TradeSave] UPDATE failed', { tradeId: dataToSave.id, source, operationId, error });
+        toast.error('ذخیرهٔ معامله ناموفق بود.');
+        return false;
+      } finally {
+        setIsSaving(false);
+      }
+    })();
+    savePromiseRef.current = operation;
     try {
-      const saved = await tradeService.updateTrade(dataToSave.id, dataToSave);
-      if (saved) lastSavedRef.current = saved;
-      setShowSavedIndicator(true);
-      setTimeout(() => setShowSavedIndicator(false), 2000);
+      return await operation;
+    } finally {
+      if (savePromiseRef.current === operation) savePromiseRef.current = null;
+    }
+  }, []);
+
+  const discardNewDraft = useCallback(async () => {
+    if (!isNewDraftRef.current) return true;
+    discardInProgressRef.current = true;
+    try {
+      await savePromiseRef.current;
+      const id = tradeIdRef.current;
+      if (id) await tradeService.deleteTrade(id);
+      isNewDraftRef.current = false;
+      sessionStorage.removeItem(draftMarkerKey);
       return true;
     } catch (error) {
-      console.error('[TradeSave] UPDATE failed', { tradeId: dataToSave.id, source, operationId, error });
-      toast.error('ذخیرهٔ معامله ناموفق بود.');
+      discardInProgressRef.current = false;
+      console.error('[TradeDraft] discard failed', error);
+      toast.error('حذف پیش‌نویس معامله انجام نشد. دوباره تلاش کنید.');
       return false;
-    } finally {
-      setIsSaving(false);
     }
   }, []);
 
   useNavigationGuard({
-    isDirty: Boolean(trade && JSON.stringify(trade) !== JSON.stringify(lastSavedRef.current)),
+    isDirty: Boolean(trade && (isNewDraftRef.current || JSON.stringify(trade) !== JSON.stringify(lastSavedRef.current))),
     onSave: async () => {
-      if (trade) await saveTrade(trade);
+      return trade ? saveTrade(trade, 'navigation') : false;
     },
+    onDiscard: discardNewDraft,
   });
 
   useEffect(() => {
-    if (!trade || !initialized.current) return;
+    if (!trade || !initialized.current || !tradeAutosave) return;
     const timer = setTimeout(() => {
        if (JSON.stringify(trade) !== JSON.stringify(lastSavedRef.current)) {
          void saveTrade(trade, 'autosave');
       }
     }, 800);
     return () => clearTimeout(timer);
-  }, [trade, saveTrade]);
+  }, [trade, saveTrade, tradeAutosave]);
 
   // اتودیتکت نتیجه بر اساس سود/زیان
   useEffect(() => {
@@ -648,6 +711,7 @@ export default function NewTrade() {
     || (editId ? `/journal/trades/${editId}` : '/journal/trades');
 
   const handleCancel = async () => {
+    if (!tradeReadyRef.current) cancelBeforeCreateRef.current = true;
     requestNavigation(backUrl);
   };
 
@@ -672,6 +736,10 @@ export default function NewTrade() {
 
   const computeRMultiple = () => {
     if (!trade || trade.exitPrice === null || trade.exitPrice === undefined) return;
+    const netPnl = getNetPnl(trade);
+    if (trade.riskAmount != null && trade.riskAmount > 0 && netPnl != null) {
+      return (netPnl / trade.riskAmount).toFixed(2);
+    }
     const diff = Math.abs(trade.entryPrice - trade.stopLoss);
     if (diff === 0) return;
 
@@ -713,7 +781,7 @@ export default function NewTrade() {
   }
 
   return (
-    <div className="w-full min-w-0 max-w-4xl mx-auto space-y-6 pb-24 animate-in fade-in duration-500">
+    <div className="w-full min-w-0 max-w-6xl 2xl:max-w-[88rem] mx-auto space-y-6 pb-24 animate-in fade-in duration-500">
       <div className="flex flex-col gap-3 border-b pb-4 sticky top-0 bg-background/80 backdrop-blur z-10 pt-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           <Button variant="ghost" size="icon" onClick={() => requestNavigation(backUrl)}>
@@ -780,9 +848,73 @@ export default function NewTrade() {
         </div>
       )}
 
-      <div className="space-y-12">
+      <div className="tm-trade-form grid gap-4 xl:grid-cols-2 2xl:grid-cols-3 items-start">
+        {isQuickMode && (
+          <section className="space-y-4 rounded-xl border border-primary/25 bg-primary/[0.025] p-4 xl:col-span-2 2xl:col-span-3" data-testid="quick-trade-form">
+            <div>
+              <h2 className="text-lg font-semibold">ثبت سریع اسکالپ</h2>
+              <p className="mt-1 text-xs text-muted-foreground">نماد، جهت، ورود و حد ضرر را ثبت کنید؛ بخش‌های اختیاری در حالت کامل در دسترس‌اند.</p>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="space-y-1.5">
+                <Label>نماد</Label>
+                <Input
+                  value={trade.symbol}
+                  onChange={event => {
+                    const symbol = event.target.value.toUpperCase();
+                    handleChange('symbol', symbol);
+                    const found = TRADING_SYMBOLS.find(item => item.value === symbol);
+                    handleChange('market', found?.market ?? tradeMarket(symbol));
+                  }}
+                  placeholder="مثلاً XAUUSD"
+                  data-testid="quick-trade-symbol"
+                  dir="ltr"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>جهت</Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant={trade.direction === 'long' ? 'default' : 'outline'} className="flex-1" onClick={() => handleChange('direction', 'long')}>خرید</Button>
+                  <Button type="button" variant={trade.direction === 'short' ? 'default' : 'outline'} className="flex-1" onClick={() => handleChange('direction', 'short')}>فروش</Button>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>وضعیت</Label>
+                <div className="flex gap-2">
+                  <Button type="button" variant={trade.status === 'open' ? 'default' : 'outline'} className="flex-1" onClick={() => handleChange('status', 'open')}>باز</Button>
+                  <Button type="button" variant={trade.status === 'closed' ? 'default' : 'outline'} className="flex-1" onClick={() => handleChange('status', 'closed')}>بسته</Button>
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label>قیمت ورود</Label>
+                <NumericInput value={trade.entryPrice} onValueChange={value => handleChange('entryPrice', value ?? 0)} data-testid="quick-entry-price" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>حد ضرر</Label>
+                <NumericInput value={trade.stopLoss} onValueChange={value => handleChange('stopLoss', value ?? 0)} data-testid="quick-stop-loss" />
+              </div>
+              <div className="space-y-1.5">
+                <Label>حد سود (اختیاری)</Label>
+                <NumericInput value={trade.takeProfit} onValueChange={value => handleChange('takeProfit', value)} />
+              </div>
+              {trade.status === 'closed' && (
+                <>
+                  <div className="space-y-1.5">
+                    <Label>قیمت خروج</Label>
+                    <NumericInput value={trade.exitPrice} onValueChange={value => handleChange('exitPrice', value)} data-testid="quick-exit-price" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>سود / زیان</Label>
+                    <NumericInput value={trade.profitLoss} onValueChange={value => handleChange('profitLoss', value)} data-testid="quick-profit-loss" />
+                  </div>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* SECTION 1: Trade Info */}
-        <section className="space-y-6">
+        {!isQuickMode && (<section className="space-y-6 xl:col-span-2 2xl:col-span-3">
           <h2 className="text-lg font-semibold border-b pb-2">1. Trade Info</h2>
           {journalSessionId && <Card className="border-primary/20 bg-primary/[0.03]" data-testid="card-journal-session-context">
             <CardContent className="space-y-3 p-4">
@@ -903,7 +1035,8 @@ export default function NewTrade() {
                  const nextAccountId = v === 'none' ? null : v;
                  handleChange('accountId' as any, nextAccountId);
                  const selectedBox = tradingBoxes.find(box => box.id === (trade as any).boxId);
-                 if (selectedBox?.accountId && selectedBox.accountId !== nextAccountId) {
+                 const selectedAccount = accounts.find(account => account.id === nextAccountId);
+                 if (selectedBox && !isTradingBoxAvailableForAccount(selectedBox, selectedAccount)) {
                    handleChange('boxId' as any, null);
                  }
                }}>
@@ -938,7 +1071,7 @@ export default function NewTrade() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">بدون باکس</SelectItem>
-                   {tradingBoxes.filter(b => b.status === 'active' && (!(b as any).accountId || (b as any).accountId === (trade as any).accountId)).map(b => (
+                   {tradingBoxes.filter(b => b.status === 'active' && isTradingBoxAvailableForAccount(b, accounts.find(account => account.id === (trade as any).accountId))).map(b => (
                     <SelectItem key={b.id} value={b.id}>
                       <span className="flex items-center gap-2">
                         <span className="inline-block w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: b.color }} />
@@ -950,10 +1083,10 @@ export default function NewTrade() {
               </Select>
             </div>}
           </div>
-        </section>
+        </section>)}
 
         {/* SECTION 2: Entry Details */}
-        <section className="space-y-6">
+        {!isQuickMode && (<section className="space-y-6">
           <h2 className="text-lg font-semibold border-b pb-2">2. Entry Details</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
@@ -977,10 +1110,10 @@ export default function NewTrade() {
               <NumericInput value={trade.takeProfit} onValueChange={value => handleChange('takeProfit', value)} />
             </div>
           </div>
-        </section>
+        </section>)}
 
         {/* SECTION 3: Position Sizing — از ۰.۰۱ لات شروع می‌شود */}
-        <section className="space-y-6">
+        {!isQuickMode && (<section className="space-y-6">
           <h2 className="text-lg font-semibold border-b pb-2">3. حجم و ریسک</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {/* حجم پوزیشن — لیست از ۰.۰۱ */}
@@ -1057,10 +1190,10 @@ export default function NewTrade() {
               <NumericInput value={trade.riskAmount} onValueChange={value => handleChange('riskAmount', value)} />
             </div>
           </div>
-        </section>
+        </section>)}
 
         {/* SECTION 4: Exit Details */}
-        {trade.status === 'closed' && (
+        {!isQuickMode && trade.status === 'closed' && (
           <section className="space-y-6 animate-in slide-in-from-bottom-4">
             <h2 className="text-lg font-semibold border-b pb-2">4. Exit Details</h2>
             
@@ -1106,7 +1239,7 @@ export default function NewTrade() {
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <Label>R Multiple</Label>
-                  {computedR && <span className="text-xs text-muted-foreground">Auto: {computedR}R</span>}
+                  {computedR && <span className="text-xs text-muted-foreground" title="از سود/زیان خالص تقسیم بر مبلغ ریسک استفاده می‌کند؛ اگر ریسک دلاری ثبت نشده باشد، از فاصلهٔ ورود تا حد ضرر محاسبه می‌شود.">محاسبه‌شده: {computedR}R</span>}
                 </div>
                 <NumericInput value={trade.rMultiple} onValueChange={value => handleChange('rMultiple', value)} />
               </div>
@@ -1275,7 +1408,7 @@ export default function NewTrade() {
 
         {/* ── تحلیل چند تایم‌فریمی (MTF) ── */}
         {!isQuickMode && !journalSessionId && (
-          <section className="space-y-4">
+          <section className="space-y-4 xl:col-span-2 2xl:col-span-3">
             <h2 className="text-lg font-semibold border-b pb-2">۶ب. تحلیل چند تایم‌فریمی</h2>
             <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border p-3">
               <span className="text-xs text-muted-foreground">تایم‌فریم‌ها:</span>
@@ -1451,7 +1584,7 @@ export default function NewTrade() {
         )}
 
         {/* SECTION 7: Screenshots */}
-        <section className="space-y-4">
+        <section className="space-y-4 xl:col-span-2 2xl:col-span-3">
           <h2 className="text-lg font-semibold border-b pb-2">۷. اسکرین‌شات‌ها</h2>
           <ScreenshotManager
             trade={trade}
@@ -1462,7 +1595,7 @@ export default function NewTrade() {
 
         {/* SECTION 8: Review */}
         {!isQuickMode && !journalSessionId && trade.status === 'closed' && (
-          <section className="space-y-6 animate-in slide-in-from-bottom-4">
+          <section className="space-y-6 animate-in slide-in-from-bottom-4 xl:col-span-2 2xl:col-span-3">
             <h2 className="text-lg font-semibold border-b pb-2">8. Trade Review</h2>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1518,7 +1651,7 @@ export default function NewTrade() {
         )}
 
         {/* SECTION 9: Notes & Tags */}
-        {!isQuickMode && (<section className="space-y-6">
+        {!isQuickMode && (<section className="space-y-6 xl:col-span-2 2xl:col-span-3">
           <h2 className="text-lg font-semibold border-b pb-2">۹. یادداشت و برچسب معامله</h2>
           <div className="space-y-4">
             <div className="space-y-2">

@@ -17,6 +17,7 @@ import {
 import { toast } from "sonner";
 import { appStorage } from "../services/storageService";
 import { HardDrive } from "lucide-react";
+import { VoiceTypingButton } from "../components/ui/VoiceTypingButton";
 
 // ─────────────────────────────────────────────
 // ثوابت و انواع
@@ -117,6 +118,7 @@ export default function BackupRestore() {
 
   // ── Excel Export state
   const [exportingExcel, setExportingExcel] = useState(false);
+  const [exportingWord, setExportingWord] = useState(false);
 
   const handleExcelExport = async () => {
     setExportingExcel(true);
@@ -127,6 +129,42 @@ export default function BackupRestore() {
       toast.error('خطا در ساخت فایل Excel. لطفاً دوباره تلاش کنید.');
     } finally {
       setExportingExcel(false);
+    }
+  };
+
+  const [exportingJournalWord, setExportingJournalWord] = useState(false);
+  const [journalFrom, setJournalFrom] = useState('');
+  const [journalTo, setJournalTo] = useState('');
+
+  const handleJournalWordExport = async () => {
+    setExportingJournalWord(true);
+    try {
+      const count = await backupService.exportJournalWord({
+        from: journalFrom ? new Date(`${journalFrom}T00:00:00`).getTime() : undefined,
+        to: journalTo ? new Date(`${journalTo}T23:59:59.999`).getTime() : undefined,
+      });
+      if (count === 0) toast.warning('در این بازه سشنی پیدا نشد؛ گزارش خالی ساخته شد.');
+      else toast.success(`گزارش ژورنال با ${count.toLocaleString('fa-IR')} سشن ساخته شد.`);
+    } catch (cause) {
+      console.error('[JournalWord] export failed', cause);
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      toast.error(`ساخت گزارش Word ژورنال ناموفق بود: ${detail}`.slice(0, 220));
+    } finally {
+      setExportingJournalWord(false);
+    }
+  };
+
+  const handleWordExport = async () => {
+    setExportingWord(true);
+    try {
+      await backupService.exportToWord();
+      toast.success('گزارش Word با موفقیت ساخته شد.');
+    } catch (cause) {
+      console.error('[Word] export failed', cause);
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      toast.error(`ساخت گزارش Word ناموفق بود: ${detail}`.slice(0, 220));
+    } finally {
+      setExportingWord(false);
     }
   };
 
@@ -339,6 +377,59 @@ export default function BackupRestore() {
              در اندروید، فایل ابتدا به‌صورت قطعی در مسیر Documents/TraderMind/Backups ذخیره می‌شود و بعد پنجره «ذخیره یا ارسال» باز می‌شود.
              اگر پنجره را ببندید، فایل همچنان در همان مسیر قابل مشاهده است؛ از برنامه Files وارد Documents و سپس TraderMind و Backups شوید.
            </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileArchive className="h-5 w-5 text-blue-500" />
+            گزارش Word
+          </CardTitle>
+          <CardDescription>
+            گزارش خواندنی رکوردها را به‌صورت DOCX دریافت کنید. برای بازیابی کامل داده‌ها و پیوست‌ها در وب، ویندوز یا اندروید، فایل پشتیبان اصلی را استفاده کنید.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-3 rounded-lg border bg-muted/20 p-4">
+          <div>
+            <p className="font-medium">دانلود گزارش اطلاعات</p>
+            <p className="text-sm text-muted-foreground">فایل Word برای مرور و چاپ؛ مستقل از پشتیبان قابل‌بازیابی</p>
+          </div>
+          <Button onClick={() => void handleWordExport()} disabled={exportingWord} variant="outline" className="shrink-0">
+            {exportingWord
+              ? <><RefreshCcw className="ml-2 h-4 w-4 animate-spin" />در حال ساخت…</>
+              : <><Download className="ml-2 h-4 w-4" />دانلود Word</>}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <FileArchive className="h-5 w-5 text-emerald-500" />
+            گزارش Word ژورنال روزانه
+          </CardTitle>
+          <CardDescription>
+            برای هر روز معاملاتی: تاریخ و ساعت شروع، جدول معاملات، تحلیل‌های چندبازه‌ای همراه عکس هر تایم‌فریم، و جدول معاملات به‌همراه تریگر (عکس تریگر بعد از جدول).
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 rounded-lg border bg-muted/20 p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-1.5 text-sm">
+              <span className="text-muted-foreground">از تاریخ (اختیاری)</span>
+              <input type="date" value={journalFrom} onChange={event => setJournalFrom(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" data-testid="input-journal-word-from" />
+            </label>
+            <label className="space-y-1.5 text-sm">
+              <span className="text-muted-foreground">تا تاریخ (اختیاری)</span>
+              <input type="date" value={journalTo} onChange={event => setJournalTo(event.target.value)} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" data-testid="input-journal-word-to" />
+            </label>
+          </div>
+          <p className="text-xs text-muted-foreground">اگر تاریخی انتخاب نکنید همهٔ سشن‌ها وارد گزارش می‌شوند. با عکس‌های زیاد ساخت فایل کمی زمان می‌برد.</p>
+          <Button onClick={() => void handleJournalWordExport()} disabled={exportingJournalWord} className="w-full sm:w-auto" data-testid="button-export-journal-word">
+            {exportingJournalWord
+              ? <><RefreshCcw className="ml-2 h-4 w-4 animate-spin" />در حال ساخت…</>
+              : <><Download className="ml-2 h-4 w-4" />دانلود گزارش ژورنال (Word)</>}
+          </Button>
         </CardContent>
       </Card>
 
@@ -744,12 +835,13 @@ export default function BackupRestore() {
               <p className="text-destructive font-medium">این عملیات قابل بازگشت نیست. ابتدا از داده‌های خود پشتیبان بگیرید.</p>
               <div className="mt-4">
                 <label className="text-sm font-medium">برای تأیید، «پاک شود» را تایپ کنید:</label>
+                <div className="flex h-5 justify-end mt-1"><VoiceTypingButton /></div>
                 <input
                   type="text"
                   value={resetConfirmText}
                   onChange={e => setResetConfirmText(e.target.value)}
                   placeholder="پاک شود"
-                  className="mt-2 w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                   dir="rtl"
                 />
               </div>

@@ -4,6 +4,7 @@ import { strategyService } from './strategyService';
 import { analysisService } from './analysisService';
 import { tradeVersionService, tradeEventService } from './tradeEventService';
 import { detectTradingSession } from '../lib/tradeClassification';
+import { isTradingBoxAvailableForAccount } from './tradingBoxService';
 
 const defaultReview = JSON.stringify({ didWell: '', didWrong: '', learned: '', wouldTakeAgain: null, validSetup: null });
 const defaultPostTradeReviewStr = JSON.stringify(defaultPostTradeReview);
@@ -80,7 +81,8 @@ export const tradeService = {
       defaults.boxId ? db.tradingBoxes.get(defaults.boxId) : Promise.resolve(undefined),
     ]);
     defaults.accountId = linkedJournalSession?.accountId ?? (defaultAccount && !defaultAccount.isArchived ? defaultAccount.id : null);
-    defaults.boxId = linkedJournalSession?.tradingBoxId ?? defaultBox?.id ?? null;
+    defaults.boxId = linkedJournalSession?.tradingBoxId
+      ?? (defaultBox && isTradingBoxAvailableForAccount(defaultBox, defaultAccount) ? defaultBox.id : null);
     defaults.strategyId = linkedJournalSession?.strategyId ?? null;
     if (sessionSymbol) defaults.symbol = sessionSymbol;
 
@@ -220,6 +222,7 @@ export const tradeService = {
         db.marketContextSessions,
         db.journalTradeData,
         db.journalMedia,
+        db.journalTriggerEvents,
       ],
       async () => {
         // حذف رکوردهای وابسته
@@ -230,6 +233,18 @@ export const tradeService = {
         await db.learningAuditTrail.where('tradeId').equals(id).delete();
         await db.journalTradeData.where('tradeId').equals(id).delete();
         await db.journalMedia.where('tradeId').equals(id).delete();
+
+        // حذف معامله، تریگر سشن را نیز از وضعیت «تبدیل‌شده» به صف انتخاب برمی‌گرداند.
+        const linkedTriggers = await db.journalTriggerEvents.where('linkedTradeId').equals(id).toArray();
+        for (const trigger of linkedTriggers) {
+          await db.journalTriggerEvents.update(trigger.id, {
+            linkedTradeId: null,
+            status: 'pending',
+            linkedTradeDirection: null,
+            linkedTradeEntryTriggerOptionId: null,
+            updatedAt: Date.now(),
+          });
+        }
 
         // unlink کردن marketContextSessions بدون حذف آن‌ها
         const linkedSessions = await db.marketContextSessions
@@ -274,7 +289,7 @@ export const tradeService = {
       total: trades.length,
       winRate: closed.length > 0 ? (wins.length / closed.length) * 100 : 0,
       totalPnl: trades.reduce((acc, t) => acc + (getNetPnl(t) ?? 0), 0),
-      avgRMultiple: withR.length > 0 ? withR.reduce((acc, t) => acc + (t.rMultiple || 0), 0) / withR.length : 0,
+      avgRMultiple: withR.length > 0 ? withR.reduce((acc, t) => acc + (t.rMultiple ?? 0), 0) / withR.length : 0,
       closedCount: closed.length,
       openCount: trades.filter(t => t.status === 'open').length,
     };

@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Input } from '../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Textarea } from '../components/ui/textarea';
+import { TradeExcursionCard } from '../components/journal/TradeExcursionCard';
 
 type PsychologyPhase = { optionIds: string[]; intensity: number };
 type Psychology = { before: PsychologyPhase; during: PsychologyPhase; after: PsychologyPhase };
@@ -398,6 +399,8 @@ export default function JournalTradeReview() {
           </div>
         </CardContent>
       </Card>
+
+      <TradeExcursionCard trade={trade} onSaved={load} />
 
       <Card>
         <CardHeader><CardTitle className="text-base">روانشناسی</CardTitle></CardHeader>

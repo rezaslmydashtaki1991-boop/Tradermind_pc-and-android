@@ -44,6 +44,7 @@ if (
 }
 
 run(pnpm, ['exec', 'cap', 'sync', 'android']);
+run(process.execPath, [path.join(appRoot, 'scripts', 'patch-android-native.mjs')]);
 
 const gradle = isWindows
   ? path.join(androidDir, 'gradlew.bat')
