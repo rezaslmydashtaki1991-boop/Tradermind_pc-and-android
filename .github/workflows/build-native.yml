@@ -1,0 +1,101 @@
+name: Build Android and Windows installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+      - replit-native-build
+    paths:
+      - "artifacts/tradermind/**"
+      - "lib/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - ".github/workflows/build-native.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  android-debug:
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install app dependencies
+        run: pnpm install --frozen-lockfile --filter @workspace/tradermind...
+
+      - name: Build debug APK
+        run: pnpm --filter @workspace/tradermind run build:android:debug
+
+      - name: Store APK as a downloadable workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TraderMind-Android-debug-APK
+          path: artifacts/tradermind/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-x64:
+    name: Windows x64 installer
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.26.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install app dependencies
+        run: pnpm install --frozen-lockfile --filter @workspace/tradermind...
+
+      - name: Build Windows x64 installer and portable executable
+        run: pnpm --filter @workspace/tradermind run build:windows:x64
+
+      - name: Store Windows builds as downloadable workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TraderMind-Windows-x64
+          path: artifacts/tradermind/dist/windows/*.exe
+          if-no-files-found: error
+          retention-days: 14
